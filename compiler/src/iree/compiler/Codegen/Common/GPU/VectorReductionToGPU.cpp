@@ -158,7 +158,7 @@ struct InsertToBroadcast final : OpRewritePattern<vector::InsertOp> {
     if (insertOp.getDestVectorType().getNumElements() != 1)
       return failure();
     rewriter.replaceOpWithNewOp<vector::BroadcastOp>(
-        insertOp, insertOp.getDestVectorType(), insertOp.getSource());
+        insertOp, insertOp.getDestVectorType(), insertOp.getValueToStore());
     return success();
   }
 };
@@ -201,9 +201,7 @@ static Value simpleWarpShuffleFunction(Location loc, OpBuilder &builder,
 
 struct VectorReductionToGPUPass final
     : impl::VectorReductionToGPUPassBase<VectorReductionToGPUPass> {
-  VectorReductionToGPUPass(bool expandSubgroupReduction)
-      : expandSubgroupReduction(expandSubgroupReduction) {}
-
+  using VectorReductionToGPUPassBase::VectorReductionToGPUPassBase;
   void runOnOperation() override {
     FunctionOpInterface funcOp = getOperation();
     MLIRContext *ctx = &getContext();
@@ -318,16 +316,7 @@ struct VectorReductionToGPUPass final
 
     debugPrint(funcOp, "after step #5: lowering remaining ops");
   }
-
-private:
-  bool expandSubgroupReduction;
 };
 
 } // namespace
-
-std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
-createConvertVectorReductionToGPUPass(bool expandSubgroupReduction) {
-  return std::make_unique<VectorReductionToGPUPass>(expandSubgroupReduction);
-}
-
 } // namespace mlir::iree_compiler

@@ -61,7 +61,9 @@ static bool producedByValueExtract(OpFoldResult index) {
 
   // Get the backward slice of the index.
   SetVector<Operation *> backwardSlice;
-  getBackwardSlice(indexVal, &backwardSlice, options);
+  [[maybe_unused]] LogicalResult result =
+      getBackwardSlice(indexVal, &backwardSlice, options);
+  assert(result.succeeded());
   return hasExtract;
 }
 
@@ -111,8 +113,8 @@ bool isOffsetSizeAndStrideMappableToFlow(ArrayRef<OpFoldResult> offsets,
     } else {
       // TODO: Use ValueBoundsAnalysis to check whether two dynamic values
       // are equal.
-      if (!(staticOffset == 0 && !ShapedType::isDynamic(staticSize) &&
-            !ShapedType::isDynamic(baseShape[dim - 1]) &&
+      if (!(staticOffset == 0 && ShapedType::isStatic(staticSize) &&
+            ShapedType::isStatic(baseShape[dim - 1]) &&
             staticSize == baseShape[dim - 1])) {
         fullSlices = false;
       }

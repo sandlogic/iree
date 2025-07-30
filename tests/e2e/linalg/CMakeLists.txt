@@ -17,7 +17,12 @@ iree_check_single_backend_test_suite(
     "conv2d.mlir"
     "fp_to_subbyte.mlir"
     "narrow_n_matmuls.mlir"
+    "pack.mlir"
+    "pack_dynamic_inner_tiles.mlir"
+    "pack_i8.mlir"
+    "softmax.mlir"
     "subbyte_to_fp.mlir"
+    "unpack.mlir"
   TARGET_BACKEND
     "llvm-cpu"
   DRIVER
@@ -34,6 +39,11 @@ iree_check_single_backend_test_suite(
   SRCS
     "conv2d.mlir"
     "narrow_n_matmuls.mlir"
+    "pack.mlir"
+    "pack_dynamic_inner_tiles.mlir"
+    "pack_i8.mlir"
+    "softmax.mlir"
+    "unpack.mlir"
   TARGET_BACKEND
     "vmvx"
   DRIVER
@@ -42,10 +52,27 @@ iree_check_single_backend_test_suite(
 
 iree_check_single_backend_test_suite(
   NAME
+    check_vmvx_ukernel_local-task
+  SRCS
+    "pack.mlir"
+    "pack_dynamic_inner_tiles.mlir"
+    "unpack.mlir"
+  TARGET_BACKEND
+    "vmvx"
+  DRIVER
+    "local-task"
+  COMPILER_FLAGS
+    "--iree-vmvx-enable-microkernels"
+    "--iree-vmvx-enable-ukernels-decompose-linalg-generic=false"
+)
+
+iree_check_single_backend_test_suite(
+  NAME
     check_vulkan-spirv_vulkan
   SRCS
     "conv2d.mlir"
     "narrow_n_matmuls.mlir"
+    "softmax.mlir"
     "subbyte_to_fp.mlir"
   TARGET_BACKEND
     "vulkan-spirv"
@@ -88,7 +115,10 @@ iree_check_single_backend_test_suite(
     "fp_to_subbyte.mlir"
     "large_linalg_matmul.mlir"
     "narrow_n_matmuls.mlir"
+    "pack_i8.mlir"
+    "softmax.mlir"
     "subbyte_to_fp.mlir"
+    "unpack.mlir"
   TARGET_BACKEND
     "cuda"
   DRIVER
@@ -99,6 +129,20 @@ iree_check_single_backend_test_suite(
     "notsan"
     "noubsan"
     "requires-gpu-nvidia"
+)
+
+iree_check_single_backend_test_suite(
+  NAME
+    check_rocm_hip
+  SRCS
+    "argmax.mlir"
+    "pack_i8.mlir"
+    "softmax.mlir"
+    "unpack.mlir"
+  TARGET_BACKEND
+    "rocm"
+  DRIVER
+    "hip"
 )
 
 iree_check_single_backend_test_suite(
@@ -114,6 +158,19 @@ iree_check_single_backend_test_suite(
     "--iree-llvmcpu-target-cpu=generic"
   LABELS
     "noriscv"
+)
+
+iree_check_single_backend_test_suite(
+  NAME
+    check_argmax_llvm-cpu_local-task
+  SRCS
+    "argmax.mlir"
+  TARGET_BACKEND
+    "llvm-cpu"
+  DRIVER
+    "local-task"
+  COMPILER_FLAGS
+    "--iree-llvmcpu-target-cpu=generic"
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

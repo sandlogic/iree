@@ -49,12 +49,13 @@
 // CHECK-DAG: %[[TID_Y_IDX:.*]] = llvm.mul %[[TID_Y_TRUNC]], %[[C64]] overflow<nsw> : i32
 //
 // Match the loop invariant math on the special registers.
-// CHECK: %[[GRP_IDX:.*]] = llvm.add %[[TID_Y_IDX]], %[[LANEID_TRUNC]]  : i32
-// CHECK: %[[GRP_IDX1:.*]] = llvm.add %[[GRP_IDX]], %{{.*}}  : i32
+// CHECK: %[[UREM:.*]] = llvm.urem %[[LANEID_TRUNC]], %{{.*}} : i32
+// CHECK: %[[ZEXT_UREM:.*]] = llvm.zext %[[UREM]] : i32 to i64
+// CHECK: %[[GRP_IDX1:.*]] = llvm.add %[[TID_Y_IDX]], %[[UREM]] : i32
 // CHECK: %[[GRP_IDX2:.*]] = llvm.and %[[GRP_IDX1]], %[[C6]]  : i32
 // CHECK: %[[GRP_IDX3:.*]] = llvm.shl %[[GRP_IDX2]], %[[C2]]  : i32
 // CHECK: %{{.*}} = llvm.xor %[[SRC:.*]], %[[GRP_IDX3]]  : i32
-// CHECK: %[[ADJ_SRC:.*]] = llvm.add %[[SRC]], %[[C16]]  : i32
+// CHECK: %[[ADJ_SRC:.*]] = llvm.add %[[SRC]], %[[C16]] overflow<nsw> : i32
 // CHECK: %[[INV:.*]] = llvm.xor %[[ADJ_SRC]], %[[GRP_IDX3]]  : i32
 // CHECK: %[[INV_EXT:.*]] = llvm.zext %[[INV]] : i32 to i64
 //
@@ -83,24 +84,23 @@
 ]>
 hal.executable private @matmul_dispatch_0 {
   hal.executable.variant public @cuda_nvptx_fb target(#executable_target_cuda_nvptx_fb) {
-    hal.executable.export public @matmul_dispatch_0_matmul_2560x2560x2560 ordinal(0) layout(#pipeline_layout) {
-    ^bb0(%arg0: !hal.device, %arg1: index, %arg2: index, %arg3: index):
-      %x, %y, %z = flow.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3
+    hal.executable.export public @matmul_dispatch_0_matmul_2560x2560x2560 ordinal(0) layout(#pipeline_layout) count(%arg0: !hal.device, %arg1: index, %arg2: index, %arg3: index) -> (index, index, index) {
+      %x, %y, %z = iree_tensor_ext.dispatch.workgroup_count_from_dag_root %arg1, %arg2, %arg3
       hal.return %x, %y, %z : index, index, index
     }
     builtin.module {
       func.func @matmul_dispatch_0_matmul_2560x2560x2560() {
         %c0 = arith.constant 0 : index
         %cst = arith.constant 0.000000e+00 : f16
-        %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags(ReadOnly) : !flow.dispatch.tensor<readonly:tensor<2560x2560xf16>>
-        %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) flags(ReadOnly) : !flow.dispatch.tensor<readonly:tensor<2560x2560xf16>>
-        %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c0) : !flow.dispatch.tensor<writeonly:tensor<2560x2560xf16>>
-        %3 = flow.dispatch.tensor.load %0, offsets = [0, 0], sizes = [2560, 2560], strides = [1, 1] : !flow.dispatch.tensor<readonly:tensor<2560x2560xf16>> -> tensor<2560x2560xf16>
-        %4 = flow.dispatch.tensor.load %1, offsets = [0, 0], sizes = [2560, 2560], strides = [1, 1] : !flow.dispatch.tensor<readonly:tensor<2560x2560xf16>> -> tensor<2560x2560xf16>
+        %0 = hal.interface.binding.subspan layout(#pipeline_layout) binding(0) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2560x2560xf16>>
+        %1 = hal.interface.binding.subspan layout(#pipeline_layout) binding(1) alignment(64) offset(%c0) flags(ReadOnly) : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2560x2560xf16>>
+        %2 = hal.interface.binding.subspan layout(#pipeline_layout) binding(2) alignment(64) offset(%c0) : !iree_tensor_ext.dispatch.tensor<writeonly:tensor<2560x2560xf16>>
+        %3 = iree_tensor_ext.dispatch.tensor.load %0, offsets = [0, 0], sizes = [2560, 2560], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2560x2560xf16>> -> tensor<2560x2560xf16>
+        %4 = iree_tensor_ext.dispatch.tensor.load %1, offsets = [0, 0], sizes = [2560, 2560], strides = [1, 1] : !iree_tensor_ext.dispatch.tensor<readonly:tensor<2560x2560xf16>> -> tensor<2560x2560xf16>
         %5 = tensor.empty() : tensor<2560x2560xf16>
         %6 = linalg.fill ins(%cst : f16) outs(%5 : tensor<2560x2560xf16>) -> tensor<2560x2560xf16>
         %7 = linalg.matmul ins(%3, %4 : tensor<2560x2560xf16>, tensor<2560x2560xf16>) outs(%6 : tensor<2560x2560xf16>) -> tensor<2560x2560xf16>
-        flow.dispatch.tensor.store %7, %2, offsets = [0, 0], sizes = [2560, 2560], strides = [1, 1] : tensor<2560x2560xf16> -> !flow.dispatch.tensor<writeonly:tensor<2560x2560xf16>>
+        iree_tensor_ext.dispatch.tensor.store %7, %2, offsets = [0, 0], sizes = [2560, 2560], strides = [1, 1] : tensor<2560x2560xf16> -> !iree_tensor_ext.dispatch.tensor<writeonly:tensor<2560x2560xf16>>
         return
       }
     }

@@ -114,7 +114,7 @@ static LogicalResult applyTileAndFuseToEachRoot(
       SmallVector<Attribute> mapping;
       int idx = 0;
       for (auto size : tileSizes) {
-        if (!isConstantIntValue(size, 0)) {
+        if (!isZeroInteger(size)) {
           unsigned mappingId =
               static_cast<unsigned>(gpu::MappingId::LinearDim0) + idx++;
           if (tilingLevel == IREE::GPU::TilingLevel::Thread) {
@@ -132,8 +132,15 @@ static LogicalResult applyTileAndFuseToEachRoot(
 
     if (tilingLevel == IREE::GPU::TilingLevel::PartialReduction) {
       tilingOptions.setReductionTilingStrategy(
-          scf::SCFTilingOptions::ReductionTilingStrategy::
-              PartialReductionOuterReduction);
+          ReductionTilingStrategy::PartialReductionOuterReduction);
+      SmallVector<unsigned> reductionDims;
+      for (auto [index, iteratorType] :
+           llvm::enumerate(tilingInterfaceOp.getLoopIteratorTypes())) {
+        if (iteratorType == utils::IteratorType::reduction) {
+          reductionDims.push_back(index);
+        }
+      }
+      tilingOptions.setReductionDims(reductionDims);
     }
 
     scf::SCFTileAndFuseOptions tileAndFuseOptions;
@@ -281,6 +288,23 @@ void GPUApplyTilingLevelPass::runOnOperation() {
   }
 
   MLIRContext *context = &getContext();
+
+  // Swap `collapse_shape` with `extract_slice` to enable more loop fusion
+  // opportunity. Currently this is only needed for convolution IGEMM path.
+  // TODO(vivian): Move the pattern to `GPUFuseAndHoistParallelLoopsPass`.
+  if (normalizeLoops) {
+    funcOp->walk(
+        [&](scf::ForOp forOp) { (void)normalizeLoopBounds(rewriter, forOp); });
+    funcOp->walk([&](scf::ForallOp forallOp) {
+      (void)normalizeLoopBounds(rewriter, forallOp);
+    });
+
+    RewritePatternSet patterns(context);
+    populateSwapExtractWithCollapsePattern(patterns);
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
+      return signalPassFailure();
+    }
+  }
 
   // Apply cleanup patterns.
   {

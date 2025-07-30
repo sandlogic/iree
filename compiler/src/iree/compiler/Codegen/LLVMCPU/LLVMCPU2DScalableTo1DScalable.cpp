@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Common/TileSizeSelection.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
 #include "iree/compiler/Codegen/Utils/LinalgOpInfo.h"
@@ -117,13 +118,14 @@ dropScalabilityFromUnsupportedOperations(mlir::FunctionOpInterface funcOp,
   });
 
   for (TilingInterface tilingOp : computeOps) {
-    auto loweringConfigAttr =
-        getLoweringConfig<IREE::Codegen::LoweringConfigAttr>(tilingOp);
+    IREE::Codegen::LoweringConfigAttrInterface loweringConfigAttr =
+        getLoweringConfig(tilingOp);
     if (!loweringConfigAttr)
       continue;
 
-    TilingConfig tilingConfig(loweringConfigAttr);
-    auto [vectorSizes, scalableFlags] = tilingConfig.getVectorTileSizes();
+    std::unique_ptr<TilingConfig> tilingConfig =
+        TilingConfig::create(loweringConfigAttr);
+    auto [vectorSizes, scalableFlags] = tilingConfig->getVectorTileSizes();
     auto numScalableDims = llvm::count(scalableFlags, true);
 
     if (numScalableDims <= 1)
@@ -154,14 +156,14 @@ dropScalabilityFromUnsupportedOperations(mlir::FunctionOpInterface funcOp,
       return failure();
 
     // 3. Update the lowering config of the new tiled operations.
-    auto newLoweringConfig = tilingConfig.getLoweringConfigWithNewVectorSizes(
+    auto newLoweringConfig = tilingConfig->getLoweringConfigWithNewVectorSizes(
         vectorSizes, newScalableFlags);
     for (auto *newOp : tilingResult->tiledOps) {
       if (isa<TilingInterface>(newOp))
         setLoweringConfig(newOp, newLoweringConfig);
     }
 
-    rewriter.replaceOp(tilingOp, tilingResult->mergeResult.replacements);
+    rewriter.replaceOp(tilingOp, tilingResult->replacements);
   }
   return success();
 }

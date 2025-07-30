@@ -16,6 +16,7 @@
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/MathExtras.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -51,7 +52,17 @@ static bool getUsesIfAllTransferOp(Value value,
                                    SmallVectorImpl<Operation *> &uses) {
   assert(uses.empty() && "expected uses to be empty");
   for (Operation *userOp : value.getUsers()) {
-    if (isa<memref::DeallocOp, memref::AssumeAlignmentOp>(userOp))
+    if (auto assumeAlignmentOp =
+            dyn_cast_if_present<memref::AssumeAlignmentOp>(userOp)) {
+      if (!getUsesIfAllTransferOp(assumeAlignmentOp.getResult(), uses)) {
+        uses.clear();
+        LLVM_DEBUG(llvm::dbgs()
+                   << "failed: non-transfer-like user: " << *userOp << "\n");
+        return false;
+      }
+      continue;
+    }
+    if (isa<memref::DeallocOp>(userOp))
       continue;
 
     if (!isa<gpu::SubgroupMmaLoadMatrixOp, gpu::SubgroupMmaStoreMatrixOp,
@@ -260,7 +271,8 @@ MemRefUsageAnalysis::MemRefUsageAnalysis(mlir::Operation *op) {
             analyzeMemRefValue(arg);
           }
         })
-        .Case<memref::AllocOp, IREE::HAL::InterfaceBindingSubspanOp>(
+        .Case<memref::AllocOp, IREE::HAL::InterfaceBindingSubspanOp,
+              memref::AssumeAlignmentOp>(
             [this](auto op) { analyzeMemRefValue(op); });
   });
 }
@@ -326,8 +338,8 @@ public:
 
     // Creates a new function with the update signature.
     rewriter.modifyOpInPlace(funcOp, [&] {
-      funcOp.setType(rewriter.getFunctionType(
-          signatureConverter.getConvertedTypes(), std::nullopt));
+      funcOp.setType(
+          rewriter.getFunctionType(signatureConverter.getConvertedTypes(), {}));
     });
     return success();
   }
@@ -350,8 +362,8 @@ public:
 
     Location loc = read.getLoc();
 
-    auto scalarMemrefType = dyn_cast<MemRefType>(read.getSource().getType());
-    auto vectorMemrefType = dyn_cast<MemRefType>(adaptor.getSource().getType());
+    auto scalarMemrefType = dyn_cast<MemRefType>(read.getBase().getType());
+    auto vectorMemrefType = dyn_cast<MemRefType>(adaptor.getBase().getType());
     auto memrefVectorType = cast<VectorType>(vectorMemrefType.getElementType());
     auto readVectorType = read.getVectorType();
     if (!scalarMemrefType || !vectorMemrefType) {
@@ -373,7 +385,7 @@ public:
     // LoadOp and cast back to the original type.
     if (*vectorMemrefElemSize == *readVecSize) {
       Value newLoad = rewriter.create<memref::LoadOp>(
-          loc, memrefVectorType, adaptor.getSource(), indices.value());
+          loc, memrefVectorType, adaptor.getBase(), indices.value());
       rewriter.replaceOpWithNewOp<vector::BitCastOp>(read, readVectorType,
                                                      newLoad);
       return success();
@@ -405,7 +417,7 @@ public:
       indices->back() = rewriter.create<affine::AffineApplyOp>(
           loc, addMap, ValueRange{oldIndex, iVal});
       vectors.push_back(
-          rewriter.create<memref::LoadOp>(loc, adaptor.getSource(), *indices));
+          rewriter.create<memref::LoadOp>(loc, adaptor.getBase(), *indices));
     }
 
     // If there is only two component vectors, we can use ShuffleOp, which is a
@@ -453,8 +465,8 @@ public:
 
     Location loc = write.getLoc();
 
-    auto scalarMemrefType = dyn_cast<MemRefType>(write.getSource().getType());
-    auto vectorMemrefType = dyn_cast<MemRefType>(adaptor.getSource().getType());
+    auto scalarMemrefType = dyn_cast<MemRefType>(write.getBase().getType());
+    auto vectorMemrefType = dyn_cast<MemRefType>(adaptor.getBase().getType());
     auto memrefVectorType = cast<VectorType>(vectorMemrefType.getElementType());
     auto writeVectorType = write.getVectorType();
     if (!scalarMemrefType || !vectorMemrefType) {
@@ -475,10 +487,10 @@ public:
     // If the transfer_write can be replaced by a store after vectorization cast
     // the original value and use StoreOp.
     if (*vectorMemrefElemSize == *writeVecSize) {
-      Value data = rewriter.create<vector::BitCastOp>(loc, memrefVectorType,
-                                                      adaptor.getVector());
+      Value data = rewriter.create<vector::BitCastOp>(
+          loc, memrefVectorType, adaptor.getValueToStore());
       rewriter.replaceOpWithNewOp<memref::StoreOp>(
-          write, data, adaptor.getSource(), indices.value());
+          write, data, adaptor.getBase(), indices.value());
       return success();
     }
 
@@ -506,13 +518,13 @@ public:
     for (int i = 0; i < vectorCount; ++i) {
       offsets.back() = i * memrefVectorType.getNumElements();
       auto slice = rewriter.create<vector::ExtractStridedSliceOp>(
-          loc, adaptor.getVector(), offsets, sizes, strides);
+          loc, adaptor.getValueToStore(), offsets, sizes, strides);
       auto component =
           rewriter.create<vector::BitCastOp>(loc, memrefVectorType, slice);
       Value iVal = rewriter.create<arith::ConstantIndexOp>(loc, i);
       indices->back() = rewriter.create<affine::AffineApplyOp>(
           loc, addMap, ValueRange{oldIndex, iVal});
-      rewriter.create<memref::StoreOp>(loc, component, adaptor.getSource(),
+      rewriter.create<memref::StoreOp>(loc, component, adaptor.getBase(),
                                        *indices);
     }
 
@@ -568,7 +580,7 @@ MemRefConversionPattern<OpTy>::getVectorizedMemRefType(
   MemRefLayoutAttrInterface layout = {};
   if (auto stridedLayout = dyn_cast<StridedLayoutAttr>(type.getLayout())) {
     auto offset = stridedLayout.getOffset();
-    if (!ShapedType::isDynamic(offset)) {
+    if (ShapedType::isStatic(offset)) {
       offset = offset / ratio;
     }
 
@@ -641,7 +653,7 @@ public:
 
     // This should be guaranteed by the analysis step. But just double check.
     assert(memrefType.getRank() > 0 &&
-           !ShapedType::isDynamic(memrefType.getShape().back()));
+           ShapedType::isStatic(memrefType.getShape().back()));
 
     auto vecMemRef = getVectorizedMemRefType(rewriter, subspanOp.getResult());
     if (!vecMemRef) {
@@ -652,6 +664,20 @@ public:
         subspanOp, *vecMemRef, subspanOp.getLayout(), subspanOp.getBinding(),
         subspanOp.getByteOffset(), subspanOp.getDynamicDims(),
         subspanOp.getAlignmentAttr(), subspanOp.getDescriptorFlagsAttr());
+    return success();
+  }
+};
+
+class ProcessAssumeAlignment final
+    : public MemRefConversionPattern<memref::AssumeAlignmentOp> {
+public:
+  using MemRefConversionPattern::MemRefConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(memref::AssumeAlignmentOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<memref::AssumeAlignmentOp>(
+        op, adaptor.getMemref(), op.getAlignmentAttr());
     return success();
   }
 };
@@ -767,7 +793,7 @@ static Value predicateMaybeMaskedScalarTransfer(
 }
 
 /// Scalarizes remaining vector transfer that couldn't be converted to
-/// vevtor load operations.
+/// vector load operations.
 
 /// This is very specific to SPIR-V as pointer cannot be casted to vector type
 /// if any of the memory access is not vector.
@@ -793,8 +819,7 @@ struct ScalarizeVectorTransferRead final
 
       auto thenCond = [&](OpBuilder &b, Location loc) {
         return b
-            .create<memref::LoadOp>(loc, readOp.getSource(),
-                                    readOp.getIndices())
+            .create<memref::LoadOp>(loc, readOp.getBase(), readOp.getIndices())
             .getResult();
       };
       auto elseCond = [&](OpBuilder &b, Location loc) {
@@ -803,7 +828,8 @@ struct ScalarizeVectorTransferRead final
 
       Value scalar = predicateMaybeMaskedScalarTransfer(
           rewriter, loc, maybeMaskBit, thenCond, elseCond);
-      rewriter.replaceOpWithNewOp<vector::SplatOp>(readOp, vectorType, scalar);
+      rewriter.replaceOpWithNewOp<vector::BroadcastOp>(readOp, vectorType,
+                                                       scalar);
       return success();
     }
 
@@ -835,8 +861,7 @@ struct ScalarizeVectorTransferRead final
       auto thenCond = [&](OpBuilder &b, Location loc) {
         indices[dimPos] = b.create<affine::AffineApplyOp>(
             loc, addMap, ValueRange{oldIndex, iVal});
-        Value scalar =
-            b.create<memref::LoadOp>(loc, readOp.getSource(), indices);
+        Value scalar = b.create<memref::LoadOp>(loc, readOp.getBase(), indices);
         return scalar;
       };
       auto elseCond = [&](OpBuilder &b, Location loc) {
@@ -865,7 +890,8 @@ struct ScalarizeVectorLoad final : public OpRewritePattern<vector::LoadOp> {
     if (vectorType.getRank() == 0) {
       Value scalar = rewriter.create<memref::LoadOp>(loc, loadOp.getBase(),
                                                      loadOp.getIndices());
-      rewriter.replaceOpWithNewOp<vector::SplatOp>(loadOp, vectorType, scalar);
+      rewriter.replaceOpWithNewOp<vector::BroadcastOp>(loadOp, vectorType,
+                                                       scalar);
       return success();
     }
 
@@ -917,9 +943,8 @@ struct ScalarizeVectorTransferWrite final
       }
 
       auto thenCond = [&](OpBuilder &b, Location loc) {
-        Value scalar =
-            b.create<vector::ExtractElementOp>(loc, writeOp.getVector());
-        b.create<memref::StoreOp>(loc, scalar, writeOp.getSource(),
+        Value scalar = b.create<vector::ExtractOp>(loc, writeOp.getVector());
+        b.create<memref::StoreOp>(loc, scalar, writeOp.getBase(),
                                   writeOp.getIndices());
         return Value();
       };
@@ -955,7 +980,7 @@ struct ScalarizeVectorTransferWrite final
         indices[dimPos] = b.create<affine::AffineApplyOp>(
             loc, addMap, ValueRange{oldIndex, iVal});
         Value scalar = b.create<vector::ExtractOp>(loc, writeOp.getVector(), i);
-        b.create<memref::StoreOp>(loc, scalar, writeOp.getSource(), indices);
+        b.create<memref::StoreOp>(loc, scalar, writeOp.getBase(), indices);
         return Value();
       };
       (void)predicateMaybeMaskedScalarTransfer(rewriter, loc, maybeMaskBit,
@@ -1058,10 +1083,9 @@ void SPIRVVectorizeLoadStorePass::runOnOperation() {
   conversionPatterns
       .add<ProcessFunctionArgument, ProcessTransferRead, ProcessTransferWrite,
            ProcessSubgroupMMALoad, ProcessSubgroupMMAStore, ProcessAlloc,
-           ProcessInterfaceBindingSubspan>(context, *memrefUsageAnalysis);
-  conversionPatterns.add<PassThroughConversion<memref::DeallocOp>,
-                         PassThroughConversion<memref::AssumeAlignmentOp>>(
-      context);
+           ProcessInterfaceBindingSubspan, ProcessAssumeAlignment>(
+          context, *memrefUsageAnalysis);
+  conversionPatterns.add<PassThroughConversion<memref::DeallocOp>>(context);
 
   ConversionTarget target(*context);
   target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
@@ -1081,7 +1105,7 @@ void SPIRVVectorizeLoadStorePass::runOnOperation() {
       });
   target.addDynamicallyLegalOp<memref::AssumeAlignmentOp>(
       [&](memref::AssumeAlignmentOp op) {
-        return !memrefUsageAnalysis->shouldVectorizeMemRef(op.getMemref());
+        return !memrefUsageAnalysis->shouldVectorizeMemRef(op.getResult());
       });
   target.addDynamicallyLegalOp<gpu::SubgroupMmaLoadMatrixOp,
                                gpu::SubgroupMmaStoreMatrixOp,

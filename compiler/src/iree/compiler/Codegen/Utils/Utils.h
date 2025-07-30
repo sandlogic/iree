@@ -7,9 +7,9 @@
 #ifndef IREE_COMPILER_CODEGEN_UTILS_UTILS_H_
 #define IREE_COMPILER_CODEGEN_UTILS_UTILS_H_
 
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "llvm/TargetParser/Triple.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
@@ -21,6 +21,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Interfaces/SubsetOpInterface.h"
 
 namespace mlir::iree_compiler {
 
@@ -83,6 +84,7 @@ bool isX86_64(Attribute attr);
 bool isAArch64(Attribute attr);
 bool isRISCV(Attribute attr);
 bool isRISCV32(Attribute attr);
+bool isRISCV64(Attribute attr);
 
 /// Checks if a tensor value is generated from a read-only object, like
 /// and interface binding with read-only attribute or from an `arith.constant`
@@ -150,6 +152,10 @@ struct LoopTilingAndDistributionInfo {
   unsigned processorDistributionDim;
 };
 
+/// Returns true if the `op` describes computation in CodeGen concept. E.g.,
+/// TilingInterface op and UKernelOpInterface are compute ops.
+bool isComputeOp(Operation *op);
+
 /// Returns the list of TilingInterface ops in the operation obtained by a
 /// post order walk of the operation. This implies that in case of
 /// nested compute ops, the outermost compute ops are towards the end of the
@@ -201,8 +207,40 @@ int getReductionTilingFactor(int64_t dimSize);
 int64_t getMinElementBitwidth(linalg::LinalgOp linalgOp);
 
 //===---------------------------------------------------------------------===//
+// Bufferization utility functions
+//===---------------------------------------------------------------------===//
+
+/// Find the memref version of the given InterfaceBindingSubspanOp. If no such
+/// op exists in the same block (before the given op), create a new op.
+Value findOrCreateSubspanBuffer(RewriterBase &rewriter,
+                                IREE::HAL::InterfaceBindingSubspanOp subspanOp);
+
+//===---------------------------------------------------------------------===//
 // Misc. utility functions.
 //===---------------------------------------------------------------------===//
+
+/// Given a list of `Value`s, set the insertion point to the last (least
+/// dominant) of these values.
+Operation *setInsertionPointAfterLastValue(OpBuilder &builder,
+                                           ArrayRef<Value> values);
+
+/// Given a SubsetInsertionOpInterface, find all values that are needed to
+/// build an equivalent subset extraction, and set the insertion point to the
+/// last of these values.
+Operation *
+setInsertionPointAfterLastNeededValue(OpBuilder &builder,
+                                      SubsetInsertionOpInterface subsetOp);
+
+/// Moves the op to right after its last (most dominant) operand. If the operand
+/// is a block argument, then the op is moved to the start of the block.
+void moveOpAfterLastOperand(RewriterBase &rewriter, DominanceInfo &domInfo,
+                            Operation *op);
+
+/// Check if the two tensor types (with their respective dynamic dimension
+/// values) have the same shape.
+bool equalTensorShape(RankedTensorType tensorType, ValueRange tensorDynSizes,
+                      IREE::TensorExt::DispatchTensorType dispatchTensorType,
+                      ValueRange dispatchTensorDynSizes);
 
 /// Convert byte offset into offsets in terms of number of elements based
 /// on `elementType`
@@ -215,9 +253,6 @@ OpFoldResult convertByteOffsetToElementOffset(RewriterBase &rewriter,
 Operation *dropEncodingAndCloneOp(OpBuilder &builder, Operation *op,
                                   ValueRange convertedInputOperands,
                                   ValueRange convertedOutputOperands);
-
-/// Check if a linalg.generic is representing an argmax operation.
-LogicalResult isArgmaxOp(linalg::GenericOp genericOp);
 
 /// Replace the uses of memref value `origValue` with the given
 /// `replacementValue`. Some uses of the memref value might require changes to
@@ -255,7 +290,7 @@ computeDimUpperBound(Value shapedValue, unsigned dimNum,
 // Utility to make sure we are storing the full incoming subspan. Otherwise we
 // cannot simply adjust the subspan's resultant type later.
 bool isFullSlice(OffsetSizeAndStrideOpInterface sliceLoadStoreOp,
-                 IREE::Flow::DispatchTensorType tensorType,
+                 IREE::TensorExt::DispatchTensorType tensorType,
                  ValueRange dynamicDims);
 
 //===----------------------------------------------------------------------===//
@@ -288,6 +323,32 @@ std::optional<VectorizationTileSizes> inferSizesFromIR(linalg::PackOp op);
 /// Returns std::nullopt if vector sizes can't be inferred.
 std::optional<VectorizationTileSizes>
 inferSizesFromIR(linalg::LinalgOp linalgOp, std::optional<OpResult> opResult);
+
+/// Returns the underlying index if the given value is a constant index.
+std::optional<int64_t> getConstantIndex(Value value);
+
+/// Return true if we can prove that the we always run at least the first
+/// iteration of the ForOp.
+bool alwaysRunsFirstIteration(scf::ForOp op);
+
+/// Return true if we can prove that the we never run more than one iteration of
+/// the ForOp.
+bool neverRunsSecondIteration(scf::ForOp op);
+
+///  This function checks whether the `genericOp` has any external captures,
+///  i.e., whether it uses any values that are defined outside of its body.
+///  %10 = linalg.generic {indexing_maps = [#map, #map],
+///          iterator_types = ["parallel", "parallel"]}
+///         ins(%5 : tensor<4096x64xi64>) outs(%9 : tensor<4096x64xf16>) {
+///          ^bb0(%in: i64, %out: f16):
+///            %14 = linalg.index 0 : index
+///            %15 = arith.index_cast %in : i64 to index
+///            %extracted = tensor.extract %4[%14, %15] : tensor<4096x64xf16>
+///            linalg.yield %extracted : f16
+///           } -> tensor<4096x64xf16>
+///  Here %4 is an external capture used via tensor.extract inside
+///  linalg.generic hence the above `genericOp` has an external capture.
+bool hasExternalCapture(linalg::GenericOp genericOp);
 
 } // namespace mlir::iree_compiler
 

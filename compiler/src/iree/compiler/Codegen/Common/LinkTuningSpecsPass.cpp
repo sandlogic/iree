@@ -9,6 +9,7 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVectorExtras.h"
+#include "llvm/Support/DebugLog.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "mlir/Dialect/Transform/IR/TransformAttrs.h"
 #include "mlir/Dialect/Transform/IR/TransformDialect.h"
@@ -18,11 +19,10 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Location.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Verifier.h"
 
 #define DEBUG_TYPE "iree-codegen-link-tuning-specs"
-#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
-#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
 namespace mlir::iree_compiler {
 
@@ -83,6 +83,8 @@ struct TuningSpecsToMerge {
   // `NamedSequenceOp` is used as a matcher or action inside a
   // `ForeachMatchOp`.
   llvm::DenseMap<NamedSequenceOp, ForeachMatchOp> namedSequenceToUser;
+  // Contains any remaining SymbolOpInterface operations to import.
+  SmallVector<SymbolOpInterface> otherSymbols;
 };
 
 // Populates the mapping of `NamedSequenceOp` to `ForeachMatchOp`
@@ -128,6 +130,12 @@ static TuningSpecsToMerge collectTuningSpecsToMerge(ModuleOp module) {
       ForeachMatchOp foreachMatch = getSingleElement(foreachMatchOps);
       updateForeachMatchMappings(foreachMatch, innerModule,
                                  tuningSpecs.namedSequenceToUser);
+    }
+    for (auto symbolOp : innerModule.getBody()->getOps<SymbolOpInterface>()) {
+      if (isa<NamedSequenceOp>(symbolOp)) {
+        continue;
+      }
+      tuningSpecs.otherSymbols.push_back(symbolOp);
     }
   }
 
@@ -200,10 +208,11 @@ static void updateNamedSequenceOp(
   foreachMatchOp.setActionsAttr(builder.getArrayAttr(updatedActions));
 }
 
-static void resolveAndMoveNamedSequenceOps(
+static LogicalResult resolveAndMoveNamedSequenceOps(
     ArrayRef<NamedSequenceOp> namedSequenceOpsToMove, ModuleOp module,
     OpBuilder &builder,
-    llvm::DenseMap<NamedSequenceOp, ForeachMatchOp> &namedSequenceToUser) {
+    llvm::DenseMap<NamedSequenceOp, ForeachMatchOp> &namedSequenceToUser,
+    ArrayRef<SymbolOpInterface> otherSymbols) {
   llvm::DenseSet<StringRef> seenNames;
   SmallVector<NamedSequenceOp> nameConflictOps;
 
@@ -212,6 +221,17 @@ static void resolveAndMoveNamedSequenceOps(
     StringRef name = op.getName();
     if (!seenNames.insert(name).second) {
       nameConflictOps.push_back(op);
+    }
+  }
+
+  // Look for any naming conflicts among other symbols.
+  for (SymbolOpInterface op : otherSymbols) {
+    StringRef name = op.getName();
+    if (!seenNames.insert(name).second) {
+      // TODO: Support updating private symbol name conflicts. There is
+      // nothing we can do for public symbols and is better done with
+      // nested references.
+      return failure();
     }
   }
 
@@ -229,6 +249,10 @@ static void resolveAndMoveNamedSequenceOps(
   for (NamedSequenceOp op : namedSequenceOpsToMove) {
     op.getOperation()->moveBefore(module.getBody(), module.getBody()->end());
   }
+  for (SymbolOpInterface op : otherSymbols) {
+    op.getOperation()->moveBefore(module.getBody(), module.getBody()->end());
+  }
+  return success();
 }
 
 // Retrieves the unique `ForeachMatchOp` inside the given `__kernel_config`
@@ -357,11 +381,15 @@ static FailureOr<NamedSequenceOp> emitLinkedDefaultTuningSpec(ModuleOp module) {
       tuningSpecs.namedSequenceOpsToMove;
   llvm::DenseMap<NamedSequenceOp, ForeachMatchOp> &namedSequenceToUser =
       tuningSpecs.namedSequenceToUser;
+  SmallVector<SymbolOpInterface> &otherSymbols = tuningSpecs.otherSymbols;
 
   // Step 2-a: Make sure the name sequence names are unique, and then move
   // collected NamedSequenceOps to the top-level module.
-  resolveAndMoveNamedSequenceOps(namedSequenceOpsToMove, module, builder,
-                                 namedSequenceToUser);
+  if (failed(resolveAndMoveNamedSequenceOps(namedSequenceOpsToMove, module,
+                                            builder, namedSequenceToUser,
+                                            otherSymbols))) {
+    return failure();
+  }
 
   // Step 2-b: Create a new entry point NamedSequenceOp called `__kernel_config`
   // in the top-level module.
@@ -475,14 +503,14 @@ FailureOr<NamedSequenceOp> linkTuningSpecs(ModuleOp module) {
 
   size_t numConsumedSpecs = llvm::count_if(tuningSpecs, consumesInputOp);
   if (numConsumedSpecs > 0 && numConsumedSpecs != tuningSpecs.size()) {
-    LDBG("Only " << numConsumedSpecs << " tuning specs out of "
-                 << tuningSpecs.size() << " total consume the input op");
+    LDBG() << "Only " << numConsumedSpecs << " tuning specs out of "
+           << tuningSpecs.size() << " total consume the input op";
     return module.emitWarning() << "Expected the argument in all tuning specs "
                                    "to be consistently readonly or consumed";
   }
 
   if (tuningSpecs.empty()) {
-    LDBG("No tuning specs found, exiting without linking");
+    LDBG() << "No tuning specs found, exiting without linking";
     return NamedSequenceOp{};
   }
 

@@ -10,6 +10,7 @@
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenTypes.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Transform/IR/TransformOps.h"
@@ -20,11 +21,13 @@
 
 #define GET_ATTRDEF_CLASSES
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.cpp.inc"
-#include "iree/compiler/Codegen/Dialect/Codegen/IR/LoweringConfigEnums.cpp.inc"
+#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenEnums.cpp.inc"
 
 static const char kTranslationInfoAttrName[] = "translation_info";
 static const char kCompilationInfoAttrName[] = "compilation_info";
 static const char kRootOpInfoAttrName[] = "root_op";
+static const char kUKernelProviderName[] = "iree_codegen.ukernel_provider";
+static const char kUKernelDescriptorName[] = "iree_codegen.ukernel";
 
 namespace mlir::iree_compiler {
 
@@ -228,8 +231,7 @@ LogicalResult LoweringConfigTilingLevelAttr::verify(
 LoweringConfigAttr
 LoweringConfigAttr::get(MLIRContext *context, TileSizesListTypeRef tileSizes,
                         ScalableTileFlagsListTypeRef scalableTileFlags,
-                        TileSizesListTypeRef tileInterchange,
-                        ArrayRef<int64_t> nativeVectorSize) {
+                        TileSizesListTypeRef tileInterchange) {
   SmallVector<LoweringConfigTilingLevelAttr> tilinglevels;
   for (auto [level, sizes] : llvm::enumerate(tileSizes)) {
     ArrayRef<int64_t> interchange = level < tileInterchange.size()
@@ -242,16 +244,13 @@ LoweringConfigAttr::get(MLIRContext *context, TileSizesListTypeRef tileSizes,
         context, sizes, interchange, scalableFlags));
   }
   return get(context,
-             LoweringConfigTilingLevelsAttr::get(context, tilinglevels),
-             nativeVectorSize);
+             LoweringConfigTilingLevelsAttr::get(context, tilinglevels));
 }
 
-LoweringConfigAttr LoweringConfigAttr::get(MLIRContext *context,
-                                           TileSizesListTypeRef tileSizes,
-                                           TileSizesListTypeRef tileInterchange,
-                                           ArrayRef<int64_t> nativeVectorSize) {
-
-  return get(context, tileSizes, {}, tileInterchange, nativeVectorSize);
+LoweringConfigAttr
+LoweringConfigAttr::get(MLIRContext *context, TileSizesListTypeRef tileSizes,
+                        TileSizesListTypeRef tileInterchange) {
+  return get(context, tileSizes, {}, tileInterchange);
 }
 
 TileSizesListType LoweringConfigAttr::getTileSizeVals() const {
@@ -307,10 +306,18 @@ SmallVector<int64_t> LoweringConfigAttr::getWorkgroupInterchange() const {
   return getTileInterchangeVals(0);
 }
 
+std::optional<unsigned> LoweringConfigAttr::getNumTilingLevels() const {
+  return getTilingLevels().size();
+}
+
 SmallVector<int64_t>
 LoweringConfigAttr::getStaticTilingLevelSizes(unsigned level,
                                               Operation *) const {
   return getTileSizeVals(level);
+}
+
+Attribute LoweringConfigAttr::getTilingLevelAttr(unsigned level) const {
+  return getTilingLevels()[level];
 }
 
 SmallVector<OpFoldResult>
@@ -331,9 +338,7 @@ bool LoweringConfigAttr::hasWorkgroupTilingLevel() const {
 
 LogicalResult
 LoweringConfigAttr::verify(function_ref<InFlightDiagnostic()> emitError,
-                           LoweringConfigTilingLevelsAttr levels,
-                           ArrayRef<int64_t> nativeVectorSizes) {
-  (void)nativeVectorSizes;
+                           LoweringConfigTilingLevelsAttr levels) {
   if (!levels)
     return emitError() << "missing lowering config levels";
   return success();
@@ -351,9 +356,8 @@ CompilationInfoAttr::verify(function_ref<InFlightDiagnostic()> emitError,
     return emitError() << "missing lowering config";
   }
   if (auto defaultConfig = llvm::dyn_cast<LoweringConfigAttr>(loweringConfig)) {
-    if (failed(LoweringConfigAttr::verify(
-            emitError, defaultConfig.getTilingLevels(),
-            defaultConfig.getNativeVectorSize()))) {
+    if (failed(LoweringConfigAttr::verify(emitError,
+                                          defaultConfig.getTilingLevels()))) {
       return emitError() << "invalid lowering config: " << defaultConfig;
     }
   }
@@ -414,7 +418,7 @@ LogicalResult WorkgroupMappingAttr::verifyAttrList(MLIRContext *context,
   for (auto attr : attrs) {
     auto typedAttr =
         ::mlir::dyn_cast_or_null<IREE::Codegen::WorkgroupMappingAttr>(attr);
-    if (!attr) {
+    if (!typedAttr) {
       return emitError() << "expected all the mapping attribute to be of "
                             "`WorkgroupMappingAttr` type";
     }
@@ -463,18 +467,124 @@ int64_t WorkgroupMappingAttr::getRelativeIndex() const {
 }
 
 //===---------------------------------------------------------------------===//
-// iree_codegen.encoding_nop_layout
+// iree_codegen.rotate_rows
 //===---------------------------------------------------------------------===//
 
-MaterializeEncodingInfo
-EncodingNopLayoutAttr::getEncodingInfo(RankedTensorType type) const {
-  return MaterializeEncodingInfo{};
+/// Given `r = |rotationInvariant|`, simplify additions of the following form:
+///
+/// %offset = arith.addi %0, c
+///
+/// Where `c` is a constant, to:
+///
+/// %offset = arith.addi %0, c % r
+static OpFoldResult getMinimumConstantOffsetValue(OpBuilder &b, Location loc,
+                                                  OpFoldResult offset,
+                                                  int64_t rotationInvariant) {
+  auto value = dyn_cast_if_present<Value>(offset);
+  if (!value)
+    return offset;
+
+  auto add = value.getDefiningOp<arith::AddIOp>();
+  if (!add)
+    return offset;
+
+  llvm::APInt constant;
+  if (!matchPattern(add.getRhs(), m_ConstantInt(&constant)))
+    return offset;
+
+  int64_t constantOffset = constant.getSExtValue();
+  int64_t baseMod = constantOffset % rotationInvariant;
+
+  // Skip constructing the new apply if it's not needed (c < rotationInvariant).
+  if (baseMod == constantOffset)
+    return offset;
+
+  Value modOffset = b.create<arith::ConstantIndexOp>(loc, baseMod);
+  // If the original add is nsw/nuw, then the new add must also be given we're
+  // adding a smaller value.
+  return b
+      .create<arith::AddIOp>(loc, add.getLhs(), modOffset,
+                             add.getOverflowFlags())
+      .getResult();
 }
 
-Operation *EncodingNopLayoutAttr::lowerOp(OpBuilder &b, Operation *op,
-                                          TypeRange convertedResTypes,
-                                          ValueRange convertedOperands) const {
-  return clone(b, op, convertedResTypes, convertedOperands);
+OpFoldResult RotateRowsAttr::swizzleOffset(OpBuilder &b, Location loc,
+                                           OpFoldResult offset,
+                                           Value src) const {
+  // First normalize the producer of the offset if possible. Note that under
+  // this swizzling scheme, every `row_width ^ 2 / access_width` elements yields
+  // the same swizzling offset. This means we can modulo the id by this value
+  // to get the simplest offset possible in case we are accessing values from
+  // successive rows. This allows us to CSE the swizzling computation more
+  // effectively.
+  int64_t rotationInvariant =
+      getRowWidth() * (getRowWidth() / getAccessWidth());
+  OpFoldResult id =
+      getMinimumConstantOffsetValue(b, loc, offset, rotationInvariant);
+
+  // Number of elements per row.
+  Value rowAlignmentVal = b.create<arith::ConstantIndexOp>(loc, getRowWidth());
+  // Number of contiguous groups of elements per row (swizzled together).
+  Value rowAccessAlignmentVal =
+      b.create<arith::ConstantIndexOp>(loc, getRowWidth() / getAccessWidth());
+  // Number of elements per group.
+  Value accessWidthVal =
+      b.create<arith::ConstantIndexOp>(loc, getAccessWidth());
+
+  Value idVal = getValueOrCreateConstantIndexOp(b, loc, id);
+  // i = row # = |offset| floordiv |Num elements per row|
+  Value i = b.create<arith::DivUIOp>(loc, idVal, rowAlignmentVal);
+  // jByte = element column # = |offset| % |Num elements per row|
+  Value jElem = b.create<arith::RemUIOp>(loc, idVal, rowAlignmentVal);
+  // j = group column # = jElem / |Num elements per group|
+  Value j = b.create<arith::DivUIOp>(loc, jElem, accessWidthVal);
+
+  // New j = ((i + j) % |Num groups per row|) * |Num elements per group|
+  Value sum = b.create<arith::AddIOp>(loc, i, j);
+  Value modByte = b.create<arith::RemUIOp>(loc, sum, rowAccessAlignmentVal);
+  Value mod = b.create<arith::MulIOp>(loc, modByte, accessWidthVal);
+
+  // Recompute the swizzled offset `(i * row width) + |new j|`
+  Value mul = b.create<arith::MulIOp>(loc, i, rowAlignmentVal);
+  Value swizzledId = b.create<arith::AddIOp>(loc, mod, mul);
+
+  // |swizzledId| is the new offset modulo the swizzle invariant, meaning to
+  // get the true swizzled offset take the difference between |swizzledId| and
+  // |id| to get change in offset and add it to |offset|.
+  //
+  // This increases the chance of being able to CSE the offset calculation. When
+  // multiple accesses to a memref only differ by a constant value (very common
+  // when working with statically shaped memrefs like shared/scratch memory).
+  Value diff = b.create<arith::SubIOp>(loc, swizzledId, idVal);
+  return b
+      .create<arith::AddIOp>(
+          loc, getValueOrCreateConstantIndexOp(b, loc, offset), diff)
+      .getResult();
+}
+
+int64_t RotateRowsAttr::getAccessElementCount() const {
+  return getAccessWidth();
+}
+
+LogicalResult
+RotateRowsAttr::verify(function_ref<InFlightDiagnostic()> emitError,
+                       int64_t rowWidth, int64_t accessWidth) {
+  if (rowWidth % accessWidth != 0) {
+    return emitError() << "expected access width to divide row width";
+  }
+  return success();
+}
+
+//===---------------------------------------------------------------------===//
+// iree_codegen.symbolic_ukernel_provider
+//===---------------------------------------------------------------------===//
+
+FailureOr<Operation *>
+SymbolicUKernelProviderAttr::getMLIRUKernel(StringRef name, DictionaryAttr,
+                                            Operation *annotationSite) const {
+  auto *symbolTableOp = SymbolTable::getNearestSymbolTable(annotationSite);
+  SymbolTable symbolTable(symbolTableOp);
+  return symbolTable.lookup(name);
 }
 
 //===----------------------------------------------------------------------===//
@@ -591,6 +701,32 @@ void eraseCompilationInfo(Operation *op) {
 
 void setRootOpInfo(Operation *op) {
   op->setAttr(kRootOpInfoAttrName, UnitAttr::get(op->getContext()));
+}
+
+bool hasRootOpInfo(Operation *op) {
+  return op->hasAttrOfType<UnitAttr>(kRootOpInfoAttrName);
+}
+
+//===----------------------------------------------------------------------===//
+// Helpers for getting/setting attributes related to ukernels.
+//===----------------------------------------------------------------------===//
+
+IREE::Codegen::UKernelProviderInterface
+getUKernelProviderFromTarget(DictionaryAttr dict) {
+  if (!dict)
+    return {};
+  return dict.getAs<IREE::Codegen::UKernelProviderInterface>(
+      kUKernelProviderName);
+}
+
+IREE::Codegen::UKernelDescriptorAttr getUKernelDescriptor(Operation *op) {
+  return op->getAttrOfType<IREE::Codegen::UKernelDescriptorAttr>(
+      kUKernelDescriptorName);
+}
+
+void setUKernelDescriptor(Operation *op,
+                          IREE::Codegen::UKernelDescriptorAttr descriptor) {
+  op->setAttr(kUKernelDescriptorName, descriptor);
 }
 
 } // namespace mlir::iree_compiler

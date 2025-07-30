@@ -5,12 +5,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "iree/compiler/Codegen/Common/Transforms.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
-#include "iree/compiler/Codegen/Transforms/Transforms.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 namespace mlir::iree_compiler {
@@ -35,12 +38,13 @@ getExpandedShape(SmallVector<ReassociationIndices> reIndices,
   if (reIndices.size() != destType.getShape().size())
     return failure();
   // Iterator to insert outer sizes.
-  auto outerShapeIter = expandedShape.begin();
+  auto outerShapeIdx = 0;
   for (auto [reassociations, destSize] :
        llvm::zip_equal(reIndices, destType.getShape())) {
     // Dynamic destination dims that are not getting expanded are allowed.
     if (ShapedType::isDynamic(destSize) && reassociations.size() == 1) {
-      expandedShape.insert(outerShapeIter++, destSize);
+      expandedShape.insert(expandedShape.begin() + outerShapeIdx, destSize);
+      outerShapeIdx++;
       totalInnerSizes.push_back(1);
       continue;
     }
@@ -62,9 +66,10 @@ getExpandedShape(SmallVector<ReassociationIndices> reIndices,
       return failure();
     totalInnerSizes.push_back(totalInnerSize);
     // insert the outer size in front of any inner sizes.
-    expandedShape.insert(outerShapeIter, destSize / totalInnerSize);
+    expandedShape.insert(expandedShape.begin() + outerShapeIdx,
+                         destSize / totalInnerSize);
     // set up the iterator for the next uncollapsed dimension.
-    outerShapeIter = expandedShape.end();
+    outerShapeIdx = expandedShape.size();
   }
   return success();
 }
@@ -117,7 +122,7 @@ expandVerifiedUsers(PatternRewriter &rewriter, Location loc, MLIRContext *ctx,
       -> std::tuple<SmallVector<OpFoldResult>, SmallVector<OpFoldResult>,
                     SmallVector<OpFoldResult>> {
     SmallVector<OpFoldResult> expandedOffsets;
-    auto expandedOffsetsIter = expandedOffsets.begin();
+    auto expandedOffsetsIdx = 0;
 
     for (auto [index, offset] : llvm::enumerate(mixedOffsets)) {
       // Add zero offsets for the extra dimensions from reIndices.
@@ -131,13 +136,13 @@ expandVerifiedUsers(PatternRewriter &rewriter, Location loc, MLIRContext *ctx,
       AffineExpr outerDimExpr = (s0).floorDiv(s1);
       // Insert computed offset using affine expression.
       expandedOffsets.insert(
-          expandedOffsetsIter,
+          expandedOffsets.begin() + expandedOffsetsIdx,
           affine::makeComposedFoldedAffineApply(
               rewriter, loc, outerDimExpr,
               {getValueOrCreateConstantIndexOp(rewriter, loc, offset),
                rewriter.getIndexAttr(totalInnerSizes[index])}));
 
-      expandedOffsetsIter = expandedOffsets.end();
+      expandedOffsetsIdx = expandedOffsets.size();
     }
     SmallVector<OpFoldResult> expandedSizes =
         getAsIndexOpFoldResult(ctx, resultType.getShape());
@@ -203,7 +208,8 @@ struct ExpandDestinationForallOp final
     // We only want this pattern if the forall op result is being written to a
     // full slice. Otherwise the hoisted collapse op is not foldable.
     for (Operation *foralluser : tiedResult.getUsers()) {
-      auto storeOp = dyn_cast<IREE::Flow::DispatchTensorStoreOp>(foralluser);
+      auto storeOp =
+          dyn_cast<IREE::TensorExt::DispatchTensorStoreOp>(foralluser);
       if (!storeOp)
         return failure();
       if (!isFullSlice(storeOp, storeOp.getTargetType(),
@@ -291,6 +297,76 @@ struct ExpandDestinationForallOp final
   }
 };
 
+/// This pattern exchanges bitcast(extract_slice) to extract_slice(bitcast) in
+/// an attempt to move the bitcast closer to the loads. There is a related
+/// pattern that does the reverse when folding the bitcast is not possible and
+/// should be applied later.
+struct SwapInnerBitcastWithExtractSlice
+    : OpRewritePattern<IREE::TensorExt::BitCastOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(IREE::TensorExt::BitCastOp bitcastOp,
+                                PatternRewriter &rewriter) const override {
+    Value bitcastSrc = bitcastOp.getSource();
+    auto sliceOp = bitcastSrc.getDefiningOp<tensor::ExtractSliceOp>();
+    if (!sliceOp) {
+      return rewriter.notifyMatchFailure(bitcastOp, "non-slice producer");
+    }
+
+    auto bitcastSrcType = cast<RankedTensorType>(bitcastSrc.getType());
+    auto bitcastResType = cast<RankedTensorType>(bitcastOp.getType());
+
+    // Verify that only the inner most dimension is changed by the bitcast by
+    // comparing dynamic and static sizes for equality.
+    if (bitcastOp.getSourceDims() != bitcastOp.getResultDims() ||
+        bitcastSrcType.getShape().drop_back() !=
+            bitcastResType.getShape().drop_back() ||
+        ShapedType::isDynamic(bitcastSrcType.getShape().back())) {
+      return rewriter.notifyMatchFailure(
+          bitcastOp, "bitcast affects more than inner most dim");
+    }
+
+    // Fail if the inner most dim is sliced or if this is an encoded tensor.
+    RankedTensorType sliceInputType = sliceOp.getSource().getType();
+    if (sliceInputType.getEncoding() ||
+        sliceInputType.getRank() != bitcastSrcType.getRank() ||
+        sliceInputType.getShape().back() != bitcastSrcType.getShape().back()) {
+      return rewriter.notifyMatchFailure(
+          bitcastOp,
+          "inner dimension is sliced or rank reducing or tensor is encoded");
+    }
+
+    int64_t newInnerSize = bitcastResType.getShape().back();
+    SmallVector<int64_t> newBitcastShape(sliceInputType.getShape());
+    newBitcastShape.back() = newInnerSize;
+
+    auto newBitcastType =
+        RankedTensorType::get(newBitcastShape, bitcastResType.getElementType());
+
+    // Get the dynamic sizes of the slice source. Extracting a slice can remove
+    // dynamic dimensions or introduce new ones, so a new list of sizes is
+    // needed.
+    SmallVector<OpFoldResult> newMixedSizes =
+        tensor::getMixedSizes(rewriter, sliceOp.getLoc(), sliceOp.getSource());
+    SmallVector<Value> sliceSourceDynamicSizes;
+    SmallVector<int64_t> sliceSourceStaticSizes;
+    dispatchIndexOpFoldResults(newMixedSizes, sliceSourceDynamicSizes,
+                               sliceSourceStaticSizes);
+
+    Value newBitcast = rewriter.create<IREE::TensorExt::BitCastOp>(
+        bitcastOp.getLoc(), newBitcastType, sliceOp.getSource(),
+        sliceSourceDynamicSizes, sliceSourceDynamicSizes);
+    SmallVector<int64_t> newSizes(sliceOp.getStaticSizes());
+    newSizes.back() = newInnerSize;
+    rewriter.replaceOpWithNewOp<tensor::ExtractSliceOp>(
+        bitcastOp, bitcastResType, newBitcast, sliceOp.getOffsets(),
+        sliceOp.getSizes(), sliceOp.getStrides(), sliceOp.getStaticOffsets(),
+        newSizes, sliceOp.getStaticStrides());
+
+    return success();
+  }
+};
+
 struct PropagateReshapesByExpansionPass final
     : impl::PropagateReshapesByExpansionPassBase<
           PropagateReshapesByExpansionPass> {
@@ -338,7 +414,9 @@ void PropagateReshapesByExpansionPass::runOnOperation() {
   tensor::ExpandShapeOp::getCanonicalizationPatterns(bubbleExpandShapePatterns,
                                                      context);
   populateReshapeToInterfaceTensorPatterns(bubbleExpandShapePatterns);
-  bubbleExpandShapePatterns.add<ExpandDestinationForallOp>(context);
+  bubbleExpandShapePatterns
+      .add<ExpandDestinationForallOp, SwapInnerBitcastWithExtractSlice>(
+          context);
 
   if (failed(applyPatternsGreedily(getOperation(),
                                    std::move(bubbleExpandShapePatterns)))) {

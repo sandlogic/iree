@@ -12,9 +12,9 @@
 namespace mlir::iree_compiler::IREE::GPU {
 
 /// Helper to retrieve/set a target mma intrinsic.
-MmaInterfaceAttr getMmaKind(LoweringConfigAttr config);
+IREE::Codegen::InnerTileDescAttrInterface getMmaKind(LoweringConfigAttr config);
 void setMmaKind(MLIRContext *context, SmallVectorImpl<NamedAttribute> &attrs,
-                MmaInterfaceAttr kind);
+                IREE::Codegen::InnerTileDescAttrInterface kind);
 
 // TODO: Merge subgroup counts functionality into subgroup tiling level
 //       lowering, when we have it implemented.
@@ -49,19 +49,26 @@ FailureOr<Basis> getBasis(IREE::GPU::LoweringConfigAttr config,
 void setBasis(MLIRContext *context, SmallVector<NamedAttribute> &attrs,
               IREE::GPU::TilingLevel level, const Basis &basis);
 
-/// Helper to retrieve/set a list of operand indices to promote.
+/// Helper to retrieve a list of operand indices to promote.
 std::optional<SmallVector<int64_t>>
 getPromotedOperandList(LoweringConfigAttr config);
+/// Helper to retrieve a list of operand promotion types.
+std::optional<ArrayRef<Attribute>>
+getPromotionTypesList(LoweringConfigAttr config);
 /// Append to `attrs` an `ArrayAttr` for `promotedOperands`.
+/// The `promotionTypes` is an optional list of Attributes
+/// describing how to promote each individual operand.
 void appendPromotedOperandsList(MLIRContext *context,
                                 SmallVectorImpl<NamedAttribute> &attrs,
-                                ArrayRef<int64_t> operands);
+                                ArrayRef<int64_t> operands,
+                                ArrayRef<Attribute> promotionTypes = {});
 /// Create a new `LoweringConfigAttr` from `currAttr` with the promoted operands
-/// list modified/set to `operands`.
-IREE::GPU::LoweringConfigAttr
-setPromotedOperandsList(MLIRContext *context,
-                        IREE::GPU::LoweringConfigAttr currAttr,
-                        ArrayRef<int64_t> operands);
+/// list modified/set to `operands`. Optional `promotionTypes` specifies how to
+/// promote each operand.
+IREE::GPU::LoweringConfigAttr setPromotedOperandsList(
+    MLIRContext *context, IREE::GPU::LoweringConfigAttr currAttr,
+    ArrayRef<int64_t> operands,
+    std::optional<ArrayRef<Attribute>> promotionTypes = std::nullopt);
 
 /// Helper to retrieve  list of operand to pad.
 std::optional<SmallVector<int64_t>> getPaddingList(LoweringConfigAttr config);

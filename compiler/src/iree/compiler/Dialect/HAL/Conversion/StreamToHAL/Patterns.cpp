@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Dialect/HAL/Conversion/StreamToHAL/Patterns.h"
-
 #include "iree/compiler/Dialect/HAL/Analysis/Captures.h"
 #include "iree/compiler/Dialect/HAL/Conversion/StreamToHAL/Utils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALDialect.h"
@@ -62,6 +61,15 @@ struct ContextResolveOpPattern
       return success();
     }
 
+    // TODO(multi-device): policy for selecting the appropriate affinity.
+    // Today we only support optimal affinities for certain ops as there needs
+    // to be some runtime policy hooks to choose otherwise. For any op that
+    // ends up here we select the first device in the optimal set.
+    if (auto deviceOptimalAttr =
+            dyn_cast_if_present<IREE::HAL::DeviceOptimalAttr>(affinityAttr)) {
+      affinityAttr = deviceOptimalAttr.getAffinities().front();
+    }
+
     // We currently only handle HAL device affinities.
     // We could make this an interface to select the device and allow users to
     // provide their own affinities to convert to HAL. In the future users may
@@ -87,22 +95,25 @@ struct ResourceAllocOpPattern
   LogicalResult
   matchAndRewrite(IREE::Stream::ResourceAllocOp allocOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto [allocator, queueAffinity] =
-        lookupAllocatorAndQueueAffinityFor(allocOp, rewriter);
     auto bufferType = rewriter.getType<IREE::HAL::BufferType>();
-
     auto resourceType =
         cast<IREE::Stream::ResourceType>(allocOp.getResult().getType());
 
-    auto memoryTypes = IREE::HAL::MemoryTypeBitfield::None;
-    auto bufferUsage = IREE::HAL::BufferUsageBitfield::None;
-    if (failed(deriveAllowedResourceBufferBits(allocOp.getLoc(), resourceType,
-                                               memoryTypes, bufferUsage))) {
-      return failure();
-    }
+    auto resolveOp =
+        rewriter.create<IREE::HAL::AllocatorResolveMemoryPropertiesOp>(
+            allocOp.getLoc(), rewriter.getI32Type(), rewriter.getI32Type(),
+            allocOp.getAffinity().value_or(nullptr),
+            static_cast<IREE::HAL::Lifetime>(resourceType.getLifetime()));
+
+    // Lookup the appropriate allocator/queue for allocation based on the buffer
+    // propreties.
+    auto [allocator, queueAffinity] = lookupAllocatorAndQueueAffinityFor(
+        allocOp, resolveOp.getMemoryTypes(), resolveOp.getBufferUsage(),
+        rewriter);
 
     rewriter.replaceOpWithNewOp<IREE::HAL::AllocatorAllocateOp>(
-        allocOp, bufferType, allocator, queueAffinity, memoryTypes, bufferUsage,
+        allocOp, bufferType, allocator, queueAffinity,
+        resolveOp.getMemoryTypes(), resolveOp.getBufferUsage(),
         adaptor.getStorageSize());
     return success();
   }
@@ -115,18 +126,23 @@ struct ResourceAllocaOpPattern
   matchAndRewrite(IREE::Stream::ResourceAllocaOp allocaOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = allocaOp.getLoc();
-    auto [device, queueAffinity] =
-        lookupDeviceAndQueueAffinityFor(allocaOp, rewriter);
-    auto bufferType = rewriter.getType<IREE::HAL::BufferType>();
 
+    // Derive buffer propreties from the resource type.
     auto resourceType =
         cast<IREE::Stream::ResourceType>(allocaOp.getResult().getType());
-    auto memoryTypes = IREE::HAL::MemoryTypeBitfield::None;
-    auto bufferUsage = IREE::HAL::BufferUsageBitfield::None;
-    if (failed(deriveAllowedResourceBufferBits(loc, resourceType, memoryTypes,
-                                               bufferUsage))) {
-      return failure();
-    }
+    auto bufferType = rewriter.getType<IREE::HAL::BufferType>();
+
+    // Lookup the appropriate device/queue for allocation based on the buffer
+    // propreties.
+    auto resolveOp =
+        rewriter.create<IREE::HAL::AllocatorResolveMemoryPropertiesOp>(
+            loc, rewriter.getI32Type(), rewriter.getI32Type(),
+            allocaOp.getAffinity().value_or(nullptr),
+            static_cast<IREE::HAL::Lifetime>(resourceType.getLifetime()));
+
+    auto [device, queueAffinity] =
+        lookupDeviceAndQueueAffinityFor(allocaOp, resolveOp.getMemoryTypes(),
+                                        resolveOp.getBufferUsage(), rewriter);
 
     // Behavior flags.
     IREE::HAL::AllocaFlagBitfield flags = IREE::HAL::AllocaFlagBitfield::None;
@@ -144,7 +160,8 @@ struct ResourceAllocaOpPattern
     auto pool = rewriter.create<arith::ConstantIntOp>(loc, 0, 64);
     auto allocateOp = rewriter.create<IREE::HAL::DeviceQueueAllocaOp>(
         loc, bufferType, device, queueAffinity, waitFence, signalFence, pool,
-        memoryTypes, bufferUsage, adaptor.getStorageSize(), flags);
+        resolveOp.getMemoryTypes(), resolveOp.getBufferUsage(),
+        adaptor.getStorageSize(), flags);
 
     rewriter.replaceOp(allocaOp, {allocateOp.getResult(), signalFence});
     return success();
@@ -159,8 +176,22 @@ struct ResourceDeallocaOpPattern
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = deallocaOp.getLoc();
+
+    // Derive buffer propreties from the resource type. This must match the
+    // original allocation. If we're uncertain if it does we have to switch to
+    // prefer-origin mode.
+    auto resourceType =
+        cast<IREE::Stream::ResourceType>(deallocaOp.getOperand().getType());
+
+    auto resolveOp =
+        rewriter.create<IREE::HAL::AllocatorResolveMemoryPropertiesOp>(
+            loc, rewriter.getI32Type(), rewriter.getI32Type(),
+            deallocaOp.getAffinity().value_or(nullptr),
+            static_cast<IREE::HAL::Lifetime>(resourceType.getLifetime()));
+
     auto [device, queueAffinity] =
-        lookupDeviceAndQueueAffinityFor(deallocaOp, rewriter);
+        lookupDeviceAndQueueAffinityFor(deallocaOp, resolveOp.getMemoryTypes(),
+                                        resolveOp.getBufferUsage(), rewriter);
 
     // Gather wait/signal fence, which are optional.
     Value waitFence =
@@ -168,10 +199,11 @@ struct ResourceDeallocaOpPattern
     Value signalFence = getOrCreateSignalFence(
         loc, device, deallocaOp.getResultTimepoint(), rewriter);
 
+    bool preferOrigin = deallocaOp.getPreferOrigin();
     // Route to the origin of the allocation (if available).
     IREE::HAL::DeallocaFlagBitfield flags =
         IREE::HAL::DeallocaFlagBitfield::None;
-    if (deallocaOp.getPreferOrigin()) {
+    if (preferOrigin) {
       flags = flags | IREE::HAL::DeallocaFlagBitfield::PreferOrigin;
     }
 
@@ -239,12 +271,9 @@ struct ResourceTryMapOpPattern
   LogicalResult
   matchAndRewrite(IREE::Stream::ResourceTryMapOp tryMapOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto [allocator, queueAffinity] =
-        lookupAllocatorAndQueueAffinityFor(tryMapOp, rewriter);
     auto resourceType =
         llvm::cast<IREE::Stream::ResourceType>(tryMapOp.getResult().getType());
     auto bufferType = rewriter.getType<IREE::HAL::BufferType>();
-
     auto memoryTypes = IREE::HAL::MemoryTypeBitfield::None;
     auto bufferUsage = IREE::HAL::BufferUsageBitfield::None;
     switch (resourceType.getLifetime()) {
@@ -280,9 +309,18 @@ struct ResourceTryMapOpPattern
       break;
     }
 
+    Value bufferUsageOp = rewriter.create<IREE::HAL::BufferUsageOp>(
+        tryMapOp.getLoc(), bufferUsage);
+    Value memoryTypeOp = rewriter.create<IREE::HAL::MemoryTypeOp>(
+        tryMapOp.getLoc(), memoryTypes);
+    // Lookup the appropriate allocator/queue for allocation based on the buffer
+    // propreties.
+    auto [allocator, queueAffinity] = lookupAllocatorAndQueueAffinityFor(
+        tryMapOp, memoryTypeOp, bufferUsageOp, rewriter);
+
     rewriter.replaceOpWithNewOp<IREE::HAL::AllocatorImportOp>(
         tryMapOp, rewriter.getI1Type(), bufferType, allocator, queueAffinity,
-        memoryTypes, bufferUsage, adaptor.getSource(),
+        memoryTypeOp, bufferUsageOp, adaptor.getSource(),
         adaptor.getSourceOffset(), adaptor.getResultSize());
     return success();
   }
@@ -419,8 +457,9 @@ buildStorageAssertions(Location loc, Value buffer, StringAttr message,
                        OpBuilder &builder) {
   auto memoryTypes = IREE::HAL::MemoryTypeBitfield::None;
   auto bufferUsage = IREE::HAL::BufferUsageBitfield::None;
-  if (failed(deriveRequiredResourceBufferBits(loc, resourceType, memoryTypes,
-                                              bufferUsage))) {
+  if (failed(deriveRequiredResourceBufferBits(
+          loc, static_cast<IREE::HAL::Lifetime>(resourceType.getLifetime()),
+          memoryTypes, bufferUsage))) {
     return failure();
   }
 
@@ -811,20 +850,142 @@ struct CmdDispatchOpPattern
     return success();
   }
 
+  // Returns the fully qualified export name (@executable::@variant::@export).
+  SymbolRefAttr getExportRef(IREE::HAL::ExecutableExportOp exportOp) const {
+    auto variantOp =
+        exportOp->getParentOfType<IREE::HAL::ExecutableVariantOp>();
+    auto executableOp = variantOp->getParentOfType<IREE::HAL::ExecutableOp>();
+    return SymbolRefAttr::get(executableOp.getSymNameAttr(),
+                              {
+                                  FlatSymbolRefAttr::get(variantOp),
+                                  FlatSymbolRefAttr::get(exportOp),
+                              });
+  }
+
+  // Selects the ordinal for the given |baseExportOp| and calculates its
+  // workgroup count. The ordinal may be different than the ordinal of the
+  // export itself if any fallbacks are specified. Each export condition will be
+  // evaluated and the first that matches will be returned.
+  //
+  // As an example, a fallback chain of @0 -> @1 -> @2 (with @0 being the
+  // highest priority) would result in a decision tree:
+  //   %ordinal, %workgroups = scf.if %cond0 {
+  //     %ordinal0 = hal.executable.export.ordinal @0
+  //     %workgroups0 = calculate for @0
+  //     scf.yield %ordinal0, %workgroups0
+  //   } else {
+  //     %ordinal12, %workgroups12 = scf.if %cond1 {
+  //       %ordinal1 = hal.executable.export.ordinal @1
+  //       %workgroups1 = calculate for @1
+  //       scf.yield %ordinal1, %workgroups1
+  //     } else {
+  //       %ordinal2 = hal.executable.export.ordinal @2
+  //       %workgroups2 = calculate for @2
+  //       scf.yield %ordinal2, %workgroups2
+  //     }
+  //     scf.yield %ordinal12, %workgroups12
+  //   }
+  std::tuple<Value, std::array<Value, 3>>
+  selectExport(Location loc, IREE::HAL::ExecutableExportOp baseExportOp,
+               Value device, ValueRange workload, OpBuilder &builder) const {
+    if (!baseExportOp.getConditionBody()) {
+      // No fallback - fast path to just the base export.
+      Value ordinal = builder.create<IREE::HAL::ExecutableExportOrdinalOp>(
+          loc, builder.getIndexType(), getExportRef(baseExportOp));
+      auto workgroupCount =
+          baseExportOp.calculateWorkgroupCount(loc, device, workload, builder);
+      return {ordinal, workgroupCount};
+    }
+    // Recursively build the selection decision tree.
+    auto fallbackExportOp =
+        SymbolTable::lookupNearestSymbolFrom<IREE::HAL::ExecutableExportOp>(
+            baseExportOp, baseExportOp.getConditionFallbackAttr());
+    return buildExportSelection(loc, baseExportOp, fallbackExportOp, device,
+                                workload, builder);
+  }
+  std::tuple<Value, std::array<Value, 3>>
+  buildExportSelection(Location loc, IREE::HAL::ExecutableExportOp tryExportOp,
+                       IREE::HAL::ExecutableExportOp fallbackExportOp,
+                       Value device, ValueRange workload,
+                       OpBuilder &builder) const {
+    // Inline the condition logic.
+    Value tryCondition =
+        tryExportOp.calculateCondition(loc, device, workload, builder);
+
+    // Create an scf.if: the then region will simply return the
+    // ordinal (condition matches) and the else region will contain the rest of
+    // the decision tree.
+    Type indexType = builder.getIndexType();
+    auto ifOp = builder.create<scf::IfOp>(
+        loc, TypeRange{indexType, indexType, indexType, indexType},
+        tryCondition,
+        /*addThenBlock=*/true, /*addElseBlock=*/true);
+    {
+      auto thenBuilder = ifOp.getThenBodyBuilder();
+      Value tryOrdinal =
+          thenBuilder.create<IREE::HAL::ExecutableExportOrdinalOp>(
+              loc, thenBuilder.getIndexType(), getExportRef(tryExportOp));
+      auto tryWorkgroupCount = tryExportOp.calculateWorkgroupCount(
+          loc, device, workload, thenBuilder);
+      thenBuilder.create<scf::YieldOp>(loc, ValueRange{
+                                                tryOrdinal,
+                                                tryWorkgroupCount[0],
+                                                tryWorkgroupCount[1],
+                                                tryWorkgroupCount[2],
+                                            });
+    }
+    {
+      auto elseBuilder = ifOp.getElseBodyBuilder();
+      if (fallbackExportOp.getConditionBody()) {
+        // Recursively chain to the next fallback-enabled export.
+        auto chainExportOp =
+            SymbolTable::lookupNearestSymbolFrom<IREE::HAL::ExecutableExportOp>(
+                fallbackExportOp, fallbackExportOp.getConditionFallbackAttr());
+        auto [chainOrdinal, chainWorkgroupCount] =
+            buildExportSelection(loc, fallbackExportOp, chainExportOp, device,
+                                 workload, elseBuilder);
+        elseBuilder.create<scf::YieldOp>(loc, ValueRange{
+                                                  chainOrdinal,
+                                                  chainWorkgroupCount[0],
+                                                  chainWorkgroupCount[1],
+                                                  chainWorkgroupCount[2],
+                                              });
+      } else {
+        // Tail of recursion; fallback has no fallback.
+        Value fallbackOrdinal =
+            elseBuilder.create<IREE::HAL::ExecutableExportOrdinalOp>(
+                loc, indexType, getExportRef(fallbackExportOp));
+        auto fallbackWorkgroupCount = fallbackExportOp.calculateWorkgroupCount(
+            loc, device, workload, elseBuilder);
+        elseBuilder.create<scf::YieldOp>(loc, ValueRange{
+                                                  fallbackOrdinal,
+                                                  fallbackWorkgroupCount[0],
+                                                  fallbackWorkgroupCount[1],
+                                                  fallbackWorkgroupCount[2],
+                                              });
+      }
+    }
+    return {ifOp.getResult(0),
+            {
+                ifOp.getResult(1),
+                ifOp.getResult(2),
+                ifOp.getResult(3),
+            }};
+  }
+
   Operation *emitDispatchOp(
       Location loc, IREE::Stream::AffinityAttr affinityAttr, Value device,
       CommandBufferConversionMapping &commandBufferMapping,
       IREE::HAL::ExecutableExportOp exportOp, SymbolRefAttr entryPointAttr,
       IREE::Stream::CmdDispatchOp dispatchOp, OpAdaptor adaptor,
       OpBuilder &builder) const {
-    auto workgroupCount = exportOp.calculateWorkgroupCount(
-        loc, device, adaptor.getWorkload(), builder);
-
     Value executable = builder.create<IREE::HAL::ExecutableLookupOp>(
         loc, builder.getType<IREE::HAL::ExecutableType>(), device,
         entryPointAttr.getRootReference().getValue());
-    Value ordinal = builder.create<IREE::HAL::ExecutableExportOrdinalOp>(
-        loc, builder.getIndexType(), entryPointAttr);
+
+    // Select the export and calculate its workgroup count.
+    auto [ordinal, workgroupCount] =
+        selectExport(loc, exportOp, device, adaptor.getWorkload(), builder);
 
     auto layoutAttr = exportOp.getLayout();
     SmallVector<IREE::HAL::BindingValue> bindings;

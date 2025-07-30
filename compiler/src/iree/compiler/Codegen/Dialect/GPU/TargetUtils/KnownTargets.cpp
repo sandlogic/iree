@@ -42,6 +42,8 @@ struct WgpDetails {
   DotProductOps dotproductOps;
   uint32_t mmaCount;
   const MMAIntrinsic *mmaOps;
+  uint32_t scaledMmaCount;
+  const ScaledMMAIntrinsic *scaledMmaOps;
 
   // We support two static values here mostly due to AMD RDNA GPUs have two
   // modes. Use duplicated values if the GPU only have one subgroup size.
@@ -99,6 +101,17 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
   for (int i = 0; i < wgp->mmaCount; ++i)
     mmaAttrs.push_back(MMAAttr::get(context, wgp->mmaOps[i]));
 
+  SmallVector<ScaledMMAAttr, 8> scaledMmaAttrs;
+  scaledMmaAttrs.reserve(wgp->scaledMmaCount);
+  for (int i = 0; i < wgp->scaledMmaCount; ++i) {
+    for (auto inTy : ScaledMMAAttr::getSupportedInputTypes(context)) {
+      for (auto outTy : ScaledMMAAttr::getSupportedOutputTypes(context)) {
+        scaledMmaAttrs.push_back(
+            ScaledMMAAttr::get(context, wgp->scaledMmaOps[i], inTy, inTy, outTy,
+                               /*columnMajor=*/false));
+      }
+    }
+  }
   SmallVector<int32_t, 2> subgroupSizes;
   assert(wgp->subgroupSizeChoices.front() != 0);
   assert(wgp->subgroupSizeChoices.back() != 0);
@@ -113,6 +126,7 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
       SubgroupOpsAttr::get(context, wgp->subgroupOps),
       DotProductOpsAttr::get(context, wgp->dotproductOps),
       MMAOpsArrayAttr::get(context, mmaAttrs),
+      ScaledMMAOpsArrayAttr::get(context, scaledMmaAttrs),
       DenseI32ArrayAttr::get(context, subgroupSizes),
       DenseI32ArrayAttr::get(context, wgp->maxWorkgroupSizes),
       wgp->maxThreadSize, wgp->maxWorkgroupMemoryBytes,
@@ -140,14 +154,72 @@ TargetAttr createTargetAttr(const TargetDetails &details, StringRef arch,
 // to 64-bits.
 //===----------------------------------------------------------------------===//
 
-const WgpDetails *getCDNA3WgpDetails() {
-  static const MMAIntrinsic cdna3MMAOps[] = {
+const WgpDetails *getCDNA4WgpDetails() {
+  static const MMAIntrinsic cdna4MMAOps[] = {
+      // Introduced in CDNA4
+      MMAIntrinsic::MFMA_F32_16x16x32_F16,
+      MMAIntrinsic::MFMA_F32_32x32x16_F16,
+      MMAIntrinsic::MFMA_F32_16x16x32_BF16,
+      MMAIntrinsic::MFMA_F32_32x32x16_BF16,
+      MMAIntrinsic::MFMA_F32_16x16x128_F8E5M2,
+      MMAIntrinsic::MFMA_F32_16x16x128_F8E5M2_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_16x16x128_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_16x16x128_F8E4M3FN_F8E5M2,
+      MMAIntrinsic::MFMA_F32_32x32x64_F8E5M2,
+      MMAIntrinsic::MFMA_F32_32x32x64_F8E5M2_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_32x32x64_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_32x32x64_F8E4M3FN_F8E5M2,
+      MMAIntrinsic::MFMA_I32_16x16x64_I8,
+      MMAIntrinsic::MFMA_I32_32x32x32_I8,
+      // Introduced in CDNA3
+      MMAIntrinsic::MFMA_F32_16x16x16_BF16,
+      MMAIntrinsic::MFMA_F32_32x32x8_BF16,
+      // Note: use same instructions as in CDNA3 but different types
+      MMAIntrinsic::MFMA_F32_16x16x32_F8E5M2,
+      MMAIntrinsic::MFMA_F32_16x16x32_F8E5M2_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_16x16x32_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_16x16x32_F8E4M3FN_F8E5M2,
+      MMAIntrinsic::MFMA_F32_32x32x16_F8E5M2,
+      MMAIntrinsic::MFMA_F32_32x32x16_F8E5M2_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_32x32x16_F8E4M3FN,
+      MMAIntrinsic::MFMA_F32_32x32x16_F8E4M3FN_F8E5M2,
+      MMAIntrinsic::MFMA_I32_16x16x32_I8,
+      MMAIntrinsic::MFMA_I32_32x32x16_I8,
+      // Introduced in CDNA2, still present in CDNA3
+      MMAIntrinsic::MFMA_F64_16x16x4_F64,
       // Introduced in CDNA1, still present in CDNA3
       MMAIntrinsic::MFMA_F32_16x16x4_F32,
       MMAIntrinsic::MFMA_F32_16x16x16_F16,
       MMAIntrinsic::MFMA_F32_32x32x8_F16,
-      // Introduced in CDNA2, still present in CDNA3
-      MMAIntrinsic::MFMA_F64_16x16x4_F64,
+  };
+  static const ScaledMMAIntrinsic cdna4ScaledMMAOps[] = {
+      // Introduced in CDNA4
+      ScaledMMAIntrinsic::MFMA_SCALE_F32_16x16x128_B32,
+      ScaledMMAIntrinsic::MFMA_SCALE_F32_32x32x64_B32,
+  };
+  static const WgpDetails cdna4Wgp = {allComputeBits,
+                                      allStorageBits,
+                                      allSubgroupOps,
+                                      allDotProductOps,
+                                      ARRAY_SIZE(cdna4MMAOps),
+                                      cdna4MMAOps,
+                                      ARRAY_SIZE(cdna4ScaledMMAOps),
+                                      cdna4ScaledMMAOps,
+                                      {64, 64},
+                                      {1024, 1024, 1024},
+                                      1024,
+                                      // Note: upgraded from CDNA3
+                                      160 * 1024,
+                                      {0x7fffffff, 0x7fffffff, 0x7fffffff},
+                                      /*maxLoadInstructionBits=*/128,
+                                      /*simdsPerWgp=*/4,
+                                      /*vgprSpaceBits=*/512 * 32};
+  return &cdna4Wgp;
+}
+
+const WgpDetails *getCDNA3WgpDetails() {
+  // Note: these operations are listed in order of preference.
+  static const MMAIntrinsic cdna3MMAOps[] = {
       // Introduced in CDNA3
       MMAIntrinsic::MFMA_F32_16x16x16_BF16,
       MMAIntrinsic::MFMA_F32_32x32x8_BF16,
@@ -161,6 +233,12 @@ const WgpDetails *getCDNA3WgpDetails() {
       MMAIntrinsic::MFMA_F32_32x32x16_F8E4M3FNUZ_F8E5M2FNUZ,
       MMAIntrinsic::MFMA_I32_16x16x32_I8,
       MMAIntrinsic::MFMA_I32_32x32x16_I8,
+      // Introduced in CDNA2, still present in CDNA3
+      MMAIntrinsic::MFMA_F64_16x16x4_F64,
+      // Introduced in CDNA1, still present in CDNA3
+      MMAIntrinsic::MFMA_F32_16x16x4_F32,
+      MMAIntrinsic::MFMA_F32_16x16x16_F16,
+      MMAIntrinsic::MFMA_F32_32x32x8_F16,
   };
   static const WgpDetails cdna3Wgp = {allComputeBits,
                                       allStorageBits,
@@ -168,6 +246,8 @@ const WgpDetails *getCDNA3WgpDetails() {
                                       allDotProductOps,
                                       ARRAY_SIZE(cdna3MMAOps),
                                       cdna3MMAOps,
+                                      0,
+                                      nullptr,
                                       {64, 64},
                                       {1024, 1024, 1024},
                                       1024,
@@ -181,16 +261,16 @@ const WgpDetails *getCDNA3WgpDetails() {
 
 const WgpDetails *getCDNA2WgpDetails() {
   static const MMAIntrinsic cdna2MMAOps[] = {
+      // Introduced in CDNA2
+      MMAIntrinsic::MFMA_F32_16x16x8_BF16,
+      MMAIntrinsic::MFMA_F32_32x32x4_BF16,
+      MMAIntrinsic::MFMA_F64_16x16x4_F64,
       // Introduced in CDNA1
       MMAIntrinsic::MFMA_F32_16x16x4_F32,
       MMAIntrinsic::MFMA_F32_16x16x16_F16,
       MMAIntrinsic::MFMA_F32_32x32x8_F16,
       MMAIntrinsic::MFMA_I32_16x16x16_I8,
       MMAIntrinsic::MFMA_I32_32x32x8_I8,
-      // Introduced in CDNA2
-      MMAIntrinsic::MFMA_F32_16x16x8_BF16,
-      MMAIntrinsic::MFMA_F32_32x32x4_BF16,
-      MMAIntrinsic::MFMA_F64_16x16x4_F64,
   };
   static const WgpDetails cdna2Wgp = {allComputeBits,
                                       allStorageBits,
@@ -198,6 +278,8 @@ const WgpDetails *getCDNA2WgpDetails() {
                                       allDotProductOps,
                                       ARRAY_SIZE(cdna2MMAOps),
                                       cdna2MMAOps,
+                                      0,
+                                      nullptr,
                                       {64, 64},
                                       {1024, 1024, 1024},
                                       1024,
@@ -221,6 +303,8 @@ const WgpDetails *getCDNA1WgpDetails() {
                                       allDotProductOps,
                                       ARRAY_SIZE(cdna1MMAOps),
                                       cdna1MMAOps,
+                                      0,
+                                      nullptr,
                                       {64, 64},
                                       {1024, 1024, 1024},
                                       1024,
@@ -251,6 +335,8 @@ const WgpDetails *getRDNA4WgpDetails() {
                                       allDotProductOps,
                                       ARRAY_SIZE(rdna4MMAOps),
                                       rdna4MMAOps,
+                                      0,
+                                      nullptr,
                                       {32, 64},
                                       {1024, 1024, 1024},
                                       1024,
@@ -277,6 +363,8 @@ const WgpDetails *getRDNA3WgpDetails() {
                                       allDotProductOps,
                                       ARRAY_SIZE(rdna3MMAOps),
                                       rdna3MMAOps,
+                                      0,
+                                      nullptr,
                                       {32, 64},
                                       {1024, 1024, 1024},
                                       1024,
@@ -289,28 +377,41 @@ const WgpDetails *getRDNA3WgpDetails() {
 }
 
 const WgpDetails *getRDNA2WgpDetails() {
-  static const WgpDetails rdna2Wgp = {
-      allComputeBits,     allStorageBits,
-      allSubgroupOps,     allDotProductOps,
-      /*mmaCount=*/0,
-      /*mmaOps=*/nullptr, {32, 64},
-      {1024, 1024, 1024}, 1024,
-      64 * 1024,          {0x7fffffff, 0x7fffffff, 0x7fffffff}};
+  static const WgpDetails rdna2Wgp = {allComputeBits,
+                                      allStorageBits,
+                                      allSubgroupOps,
+                                      allDotProductOps,
+                                      /*mmaCount=*/0,
+                                      /*mmaOps=*/nullptr,
+                                      /*scaledMmaCount=*/0,
+                                      /*scaledMmaOps=*/nullptr,
+                                      {32, 64},
+                                      {1024, 1024, 1024},
+                                      1024,
+                                      64 * 1024,
+                                      {0x7fffffff, 0x7fffffff, 0x7fffffff}};
   return &rdna2Wgp;
 }
 
 const WgpDetails *getRDNA1WgpDetails() {
-  static const WgpDetails rdna1Wgp = {
-      allComputeBits,     allStorageBits,
-      allSubgroupOps,     DotProductOps::None,
-      /*mmaCount=*/0,
-      /*mmaOps=*/nullptr, {32, 64},
-      {1024, 1024, 1024}, 1024,
-      64 * 1024,          {0x7fffffff, 0x7fffffff, 0x7fffffff}};
+  static const WgpDetails rdna1Wgp = {allComputeBits,
+                                      allStorageBits,
+                                      allSubgroupOps,
+                                      DotProductOps::None,
+                                      /*mmaCount=*/0,
+                                      /*mmaOps=*/nullptr,
+                                      /*scaledMmaCount=*/0,
+                                      /*scaledMmaOps=*/nullptr,
+                                      {32, 64},
+                                      {1024, 1024, 1024},
+                                      1024,
+                                      64 * 1024,
+                                      {0x7fffffff, 0x7fffffff, 0x7fffffff}};
   return &rdna1Wgp;
 }
 
 std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
+  const WgpDetails *cdna4Wgp = getCDNA4WgpDetails();
   const WgpDetails *cdna3Wgp = getCDNA3WgpDetails();
   const WgpDetails *cdna2Wgp = getCDNA2WgpDetails();
   const WgpDetails *cdna1Wgp = getCDNA1WgpDetails();
@@ -349,8 +450,10 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
 
   // AMD RDNA4 architecture:
   // https://www.amd.com/en/newsroom/press-releases/2025-2-28-amd-unveils-next-generation-amd-rdna-4-architectu.html.
+  static const ChipDetails r9700Chip = {64 / 2, "r9700"};
   static const ChipDetails rx9070xtChip = {64 / 2, "rx9070xt"};
   static const ChipDetails rx9070Chip = {56 / 2, "rx9070"};
+  static const ChipDetails rx9060xtChip = {32 / 2, "rx9060xt"};
 
   // AMD RDNA3.
   static const ChipDetails rx7900xtxChip = {96 / 2, "rx7900xtx"};
@@ -365,6 +468,7 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
   // See https://llvm.org/docs/AMDGPUUsage.html#processors for gfxN to
   // cdnaN/rdnaN mapping.
   return llvm::StringSwitch<std::optional<TargetDetails>>(target.lower())
+      .Cases("cdna4", "gfx950", TargetDetails{cdna4Wgp, nullptr})
       .Case("mi325x", TargetDetails{cdna3Wgp, &mi325xChip})
       .Case("mi300x", TargetDetails{cdna3Wgp, &mi300xChip})
       .Case("mi300a", TargetDetails{cdna3Wgp, &mi300aChip})
@@ -380,6 +484,10 @@ std::optional<TargetDetails> getAMDGPUTargetDetails(StringRef target) {
       .Case("rx9070xt", TargetDetails{rdna4Wgp, &rx9070xtChip})
       // https://www.techpowerup.com/gpu-specs/radeon-rx-9070.c4250
       .Case("rx9070", TargetDetails{rdna4Wgp, &rx9070Chip})
+      // https://www.techpowerup.com/gpu-specs/radeon-ai-pro-r9700.c4290
+      .Case("r9700", TargetDetails{rdna4Wgp, &r9700Chip})
+      // https://www.techpowerup.com/gpu-specs/radeon-rx-9060-xt-16-gb.c4293
+      .Case("rx9060xt", TargetDetails{rdna4Wgp, &rx9060xtChip})
       // https://www.techpowerup.com/gpu-specs/radeon-rx-7900-xtx.c3941
       .Case("rx7900xtx", TargetDetails{rdna3Wgp, &rx7900xtxChip})
       // https://www.techpowerup.com/gpu-specs/radeon-rx-7900-xt.c3912
@@ -419,7 +527,8 @@ StringRef normalizeAMDGPUTarget(StringRef target) {
       .Cases("mi300a", "mi300x", "mi308x", "mi325x", "gfx942")
       .Cases("mi250x", "mi250", "mi210", "cdna2", "gfx90a")
       .Cases("mi100", "cdna1", "gfx908")
-      .Cases("rx9070xt", "rx9070", "gfx1201")
+      .Cases("rx9070xt", "rx9070", "r9700", "gfx1201")
+      .Case("rx9060xt", "gfx1200")
       .Cases("rx7900xtx", "rx7900xt", "w7900", "w7800", "gfx1100")
       .Cases("rx7800xt", "rx7700xt", "v710", "w7700", "gfx1101")
       .Default("");
@@ -435,7 +544,8 @@ std::optional<TargetDetails> getAppleTargetDetails() {
   // clang-format off
   static const WgpDetails wgp = {
       computeBitwdiths,   allStorageBits,     allSubgroupOps,  allDotProductOps,
-      /*mmaCount=*/0,     /*mmaOps=*/nullptr, {32, 32},
+      /*mmaCount=*/0,     /*mmaOps=*/nullptr, /*scaledMmaCount=*/0,
+      /*scaledMmaOps=*/nullptr,               {32, 32},
       {1024, 1024, 1024}, 1024,               32 * 1024,
       // Note: These values have not been checked and may be higher
       {0xffff, 0xffff, 0xffff}};
@@ -458,7 +568,8 @@ const WgpDetails *getValhallWgpDetails() {
   // clang-format off
   static const WgpDetails valhallWgp = {
       computeBitwdiths,   allStorageBits,     allSubgroupOps,  allDotProductOps,
-      /*mmaCount=*/0,     /*mmaOps=*/nullptr, {16, 16},        {512, 512, 512},
+      /*mmaCount=*/0,     /*mmaOps=*/nullptr, /*scaledMmaCount=*/0,
+      /*scaledMmaOps=*/nullptr,               {16, 16},        {512, 512, 512},
       512,                32 * 1024,
       // Note: These values have not been checked and may be higher
       {0xffff, 0xffff, 0xffff}};
@@ -523,6 +634,8 @@ const WgpDetails *getAmpereWgpDetails() {
                                        allDotProductOps,
                                        ARRAY_SIZE(mmaOps),
                                        mmaOps,
+                                       0,
+                                       nullptr,
                                        {32, 32},
                                        {1024, 1024, 1024},
                                        1024,
@@ -542,6 +655,8 @@ const WgpDetails *getTuringWgpDetails() {
                                        allDotProductOps,
                                        ARRAY_SIZE(mmaOps),
                                        mmaOps,
+                                       0,
+                                       nullptr,
                                        {32, 32},
                                        {1024, 1024, 1024},
                                        1024,
@@ -557,9 +672,10 @@ const WgpDetails *getVoltaWgpDetails() {
   };
   // clang-format off
   static const WgpDetails voltaWgp = {
-      allComputeBits,     allStorageBits, allSubgroupOps, DotProductOps::None,
-      ARRAY_SIZE(mmaOps), mmaOps,         {32, 32},       {1024, 1024, 1024},
-      1024,               96 * 1024,
+      allComputeBits,       allStorageBits,     allSubgroupOps,
+      DotProductOps::None,  ARRAY_SIZE(mmaOps), mmaOps,
+      0,                    nullptr,            {32, 32},
+      {1024, 1024, 1024},   1024,               96 * 1024,
       {0x7fffffff, 0xffff, 0xffff}};
   // clang-format on
   return &voltaWgp;
@@ -570,6 +686,7 @@ const WgpDetails *getPascalWgpDetails() {
   static const WgpDetails pascalWgp = {
       allComputeBits, allStorageBits, allSubgroupOps, DotProductOps::None,
       0, nullptr, // Pascal does not have tensor core support.
+      0, nullptr,
       {32, 32}, {1024, 1024, 1024}, 1024, 48 * 1024,
       {0x7fffffff, 0xffff, 0xffff}};
   // clang-format on
@@ -651,6 +768,7 @@ const WgpDetails *getAdrenoWgpDetails() {
   static const WgpDetails adrenoWgp = {
       computeBitwdiths,   storageBitwidths,   allSubgroupOps,
       allDotProductOps,   /*mmaCount=*/0,     /*mmaOps=*/nullptr,
+      /*scaledMmaCount=*/0,                   /*scaledMmaOps=*/nullptr,
       {64, 64},           {1024, 1024, 1024}, 1024,
       32 * 1024,
       // Note: These values have not been checked and may be higher
@@ -719,6 +837,7 @@ const WgpDetails *getAndroidBaseline2022WgpDetails() {
   static const WgpDetails androidWgp = {
       computeBitwdiths,    storageBitwidths,   SubgroupOps::None,
       DotProductOps::None, /*mmaCount=*/0,     /*mmaOps=*/nullptr,
+      /*scaledMmaCount=*/0,                    /*scaledMmaOps=*/nullptr,
       {64, 64},            {128, 128, 64},     128,
       16 * 1024,
       {0xffff, 0xffff, 0xffff}};
@@ -777,16 +896,17 @@ TargetAttr getHIPTargetDetails(StringRef target, StringRef features,
 Attribute getHIPTargetEncodingLayoutAttr(TargetAttr target,
                                          StringRef resolver) {
   if (resolver == kDataTilingEncodingLayoutResolverName) {
-    // Return a GPUEncodingLayoutAttr with an empty configuration. The addtional
-    // attributes will be attached by the `cloneWithSimplifiedConfig` interface
-    // method when the resolver needs to be configured.
-    return IREE::GPU::GPUEncodingLayoutAttr::get(target.getContext(), {});
+    // Return a GPUEncodingResolverAttr with an empty configuration. The
+    // addtional attributes will be attached by the `cloneWithSimplifiedConfig`
+    // interface method when the resolver needs to be configured.
+    return IREE::GPU::GPUEncodingResolverAttr::get(target.getContext(), {});
   }
 
   if (resolver == kPadEncodingLayoutResolverName) {
-    return IREE::GPU::GPUPadLayoutAttr::get(target.getContext(),
-                                            /*cache_line_bytes=*/std::nullopt,
-                                            /*cache_sets=*/std::nullopt);
+    return IREE::GPU::GPUPaddingResolverAttr::get(
+        target.getContext(),
+        /*cache_line_bytes=*/std::nullopt,
+        /*cache_sets=*/std::nullopt);
   }
   return nullptr;
 }
@@ -845,6 +965,7 @@ TargetAttr getWebGPUTargetDetails(MLIRContext *context) {
   static const WgpDetails wgp = {
       computeBitwdiths,    storageBitwidths,   SubgroupOps::None,
       DotProductOps::None, /*mmaCount=*/0,     /*mmaOps=*/nullptr,
+      /*scaledMmaCount=*/0,                    /*scaledMmaOps=*/nullptr,
       {32, 32},            {128, 128, 64},     128,
       16 * 1024,
       {0xffff, 0xffff, 0xffff}};

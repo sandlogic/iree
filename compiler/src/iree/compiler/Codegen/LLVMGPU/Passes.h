@@ -46,7 +46,8 @@ void addGPUSimpleDistributePassPipeline(OpPassManager &funcPassManager);
 /// Lowering config driven pipeline that uses greedy tile + fuse to distribute
 /// to threads.
 void addGPUTileAndFusePassPipeline(OpPassManager &funcPassManager,
-                                   const GPUPipelineOptions &pipelineOptions);
+                                   const GPUPipelineOptions &pipelineOptions,
+                                   bool forROCDL);
 
 /// Transform dialect-based path.
 void addGPUTransformDialectPasses(OpPassManager &funcPassManager,
@@ -67,10 +68,11 @@ void addGPUWinogradVectorizePassPipeline(OpPassManager &funcPassManager);
 /// Lowering based on vector distribution patterns.
 void addGPUVectorDistributePassPipeline(OpPassManager &funcPassManager,
                                         const GPUPipelineOptions &options,
-                                        bool usePadToModelSharedMemcpy);
+                                        bool forROCDL);
 
 /// Lowering reductions to warp reductions.
-void addGPUWarpReductionPassPipeline(OpPassManager &funcPassManager);
+void addGPUWarpReductionPassPipeline(OpPassManager &funcPassManager,
+                                     bool forROCDL = true);
 
 /// Default pass pipeline on GPU, currently used only for the ukernel path.
 void addGPUDefaultPassPipeline(OpPassManager &funcPassManager,

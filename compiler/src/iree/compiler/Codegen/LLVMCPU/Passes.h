@@ -14,6 +14,7 @@
 
 #include <optional>
 
+#include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "mlir/Pass/Pass.h"
@@ -37,16 +38,18 @@ std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
 createLLVMCPUSplitReductionPass(bool enableReassociateFpReductions);
 
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
-createLLVMCPUTilePass(int64_t tilingLevel);
+createLLVMCPUTilePass(int64_t tilingLevel, bool skipRootOp);
 
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
 createLLVMCPUTileAndFusePass(int64_t tilingLevel);
 
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
-createLLVMCPUTileRootAndFuseProducerConsumer(int64_t tilingLevel);
+createLLVMCPUTileRootAndFuseProducerConsumerPass(
+    IREE::CPU::TilingLevel tilingLevel);
 
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
-createLLVMCPUTileRootAndFuseInputOperands(int64_t tilingLevel);
+createLLVMCPUTileRootAndFuseInputOperandsPass(
+    IREE::CPU::TilingLevel tilingLevel);
 
 std::unique_ptr<InterfacePass<mlir::FunctionOpInterface>>
 createLLVMCPUVerifyVectorSizeLegalityPass(
@@ -72,6 +75,7 @@ void populateVectorContractCustomKernelsPatterns(
 //----------------------------------------------------------------------------//
 
 struct LLVMCPUPipelineOptions {
+  bool disableDistribution = false;
   bool decomposePackUnPackOps = true;
   bool useConfiguredVectorSizes = true;
   bool enablePeeling = false;
@@ -101,7 +105,8 @@ void addCPULinalgExtTileAndVectorizePipeline(
 /// that is not specialized by any pipeline). Adds an additional level of tiling
 /// and converts to memrefs.
 void addCPUDefaultPassPipeline(OpPassManager &funcPassManager,
-                               FailureOr<TilingConfig> &tilingConfig);
+                               std::unique_ptr<TilingConfig> &tilingConfig,
+                               LLVMCPUPipelineOptions &pipelineOpt);
 
 void addConvTileAndDecomposeExpertPassPipeline(
     OpPassManager &funcPassManager, TilingConfig &tilingConfig,

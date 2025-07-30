@@ -35,7 +35,6 @@ inline llvm::cl::opt<bool>
 } // namespace mlir::iree_compiler
 
 // clang-format off
-#include "iree/compiler/Codegen/Dialect/Codegen/IR/LoweringConfigEnums.h.inc"
 #define GET_ATTRDEF_CLASSES
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenAttrs.h.inc"
 // clang-format on
@@ -134,6 +133,8 @@ void setLoweringConfig(Operation *op, Attribute config);
 /// tuner use.
 void setRootOpInfo(Operation *op);
 
+bool hasRootOpInfo(Operation *op);
+
 /// Convenience function that sets the lowering configuration on the operation
 /// and translation info.
 inline LogicalResult setOpConfigAndEntryPointFnTranslation(
@@ -225,6 +226,22 @@ void setCompilationInfo(Operation *op,
 /// Removes the `#iree_codegen.compilation_info` attribute that is set on the
 /// operation.
 void eraseCompilationInfo(Operation *op);
+
+//===----------------------------------------------------------------------===//
+// Helpers for getting/setting attributes related to ukernels.
+//===----------------------------------------------------------------------===//
+
+/// Returns the `iree_codegen.ukernel_provider` in the provided dictionary if
+/// present.
+IREE::Codegen::UKernelProviderInterface
+getUKernelProviderFromTarget(DictionaryAttr dict);
+
+/// Returns the `iree_codegen.ukernel` on the operation.
+IREE::Codegen::UKernelDescriptorAttr getUKernelDescriptor(Operation *op);
+
+/// Sets the `iree_codegen.ukernel` on the operation.
+void setUKernelDescriptor(Operation *op,
+                          IREE::Codegen::UKernelDescriptorAttr descriptor);
 
 } // namespace mlir::iree_compiler
 

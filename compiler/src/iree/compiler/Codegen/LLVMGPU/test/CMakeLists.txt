@@ -14,6 +14,7 @@ iree_lit_test_suite(
   NAME
     lit
   SRCS
+    "amdgpu_emulate_narrow_type.mlir"
     "assign_constant_ordinals.mlir"
     "cast_address_space_function.mlir"
     "cast_type_to_fit_mma.mlir"
@@ -21,6 +22,7 @@ iree_lit_test_suite(
     "config_horizontally_fused_ops.mlir"
     "config_matvec.mlir"
     "config_root_op_attribute.mlir"
+    "config_sort.mlir"
     "config_winograd.mlir"
     "configure_tensor_layout.mlir"
     "conv_pipeline_test_cuda.mlir"
@@ -33,6 +35,7 @@ iree_lit_test_suite(
     "extract_address_computation_gpu.mlir"
     "gpu_pipeline_data_tiling.mlir"
     "gpu_pipeline_generalize_named_ops.mlir"
+    "gpu_pipeline_relayout_ops.mlir"
     "gpu_set_num_workgroups.mlir"
     "horizontal_fusion_pipeline.mlir"
     "illegal_configuration.mlir"
@@ -45,13 +48,12 @@ iree_lit_test_suite(
     "nvvm_pipeline_test.mlir"
     "pack_shared_memory_alloc.mlir"
     "prefetch_shared_memory.mlir"
-    "promote_matmul_to_fit_mma.mlir"
     "reduction_pipeline_cuda.mlir"
     "reduction_pipeline_rocm.mlir"
     "reduction_pipeline_softmax_rocm.mlir"
     "reuse_shared_memory_allocs.mlir"
     "rocdl_pipeline_test.mlir"
-    "tensor_pad.mlir"
+    "sort_pipeline_test.mlir"
     "tensorcore_vectorization.mlir"
     "test_query_mma.mlir"
     "transform_dialect_bufferize.mlir"

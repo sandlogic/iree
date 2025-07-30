@@ -17,11 +17,10 @@ iree_cc_library(
     "FusionUtils.h"
     "Passes.h"
   SRCS
+    "BitcastUnsupportedElementTypes.cpp"
     "BubbleUpExpandShapes.cpp"
-    "BubbleUpExtractSlices.cpp"
     "CloneProducersIntoDispatchRegions.cpp"
     "CollapseDimensions.cpp"
-    "CollapseReductionDimensions.cpp"
     "ConvertDispatchRegionsToWorkgroups.cpp"
     "ConvertEncodingToFlow.cpp"
     "ConvertTensorToFlow.cpp"
@@ -29,14 +28,17 @@ iree_cc_library(
     "FoldUnitExtentDims.cpp"
     "FormDispatchRegions.cpp"
     "FormScalarDispatches.cpp"
+    "FormSplitReductionDispatches.cpp"
     "FuseEncodingOpsIntoDispatchRegions.cpp"
     "FuseHorizontalContractions.cpp"
     "FuseMultiUseElementwiseProducer.cpp"
     "FusionPreprocessing.cpp"
     "FusionUtils.cpp"
     "HoistEncodingOps.cpp"
+    "HoistUniformScalarCompute.cpp"
     "MaterializeDefaultWorkgroupCountRegion.cpp"
     "Passes.cpp"
+    "PropagateEncodings.cpp"
     "SetEncoding.cpp"
     "SinkReshapes.cpp"
     "SplitReduction.cpp"
@@ -88,8 +90,11 @@ iree_cc_library(
     iree::compiler::Dialect::LinalgExt::Transforms
     iree::compiler::Dialect::LinalgExt::Utils
     iree::compiler::Dialect::Stream::IR
+    iree::compiler::Dialect::TensorExt::IR
+    iree::compiler::Dialect::TensorExt::Transforms
     iree::compiler::Dialect::Util::Analysis
     iree::compiler::Dialect::Util::Analysis::Attributes
+    iree::compiler::Dialect::Util::Analysis::Constant
     iree::compiler::Dialect::Util::Analysis::DFX
     iree::compiler::Dialect::Util::IR
     iree::compiler::Dialect::Util::Transforms
@@ -119,6 +124,17 @@ iree_cc_library(
     MLIRTransformUtils
     MLIRTransforms
   PUBLIC
+)
+
+iree_tablegen_doc(
+  NAME
+    DispatchCreationPassesDocGen
+  CATEGORY
+    "Passes"
+  TD_FILE
+    "Passes.td"
+  OUTS
+    --gen-pass-doc DispatchCreationPasses.md
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

@@ -44,9 +44,13 @@ struct RematerializeParallelOpsPattern
 
     // Find the first operand that is defined by another generic op on tensors.
     for (OpOperand &opOperand : genericOp->getOpOperands()) {
-      if (!linalg::areElementwiseOpsFusable(&opOperand))
+      if (!linalg::areElementwiseOpsFusable(&opOperand)) {
         continue;
-
+      }
+      auto producer = opOperand.get().getDefiningOp<linalg::GenericOp>();
+      if (producer && hasExternalCapture(producer)) {
+        continue;
+      }
       FailureOr<linalg::ElementwiseOpFusionResult> fusionResult =
           linalg::fuseElementwiseOps(rewriter, &opOperand);
       if (succeeded(fusionResult)) {

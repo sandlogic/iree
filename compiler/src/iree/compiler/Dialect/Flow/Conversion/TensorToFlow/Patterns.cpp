@@ -9,6 +9,8 @@
 #include "iree/compiler/Dialect/Flow/Conversion/TensorToFlow/Utils.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
 #include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
+#include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -16,6 +18,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Utils/Utils.h"
+#include "mlir/IR/OpDefinition.h"
 
 namespace mlir::iree_compiler::IREE::Flow {
 
@@ -90,6 +93,21 @@ struct ConvertTensorExtractPattern
     }
     rewriter.replaceOpWithNewOp<IREE::Flow::TensorLoadOp>(
         op, op.getResult().getType(), op.getTensor(), op.getIndices());
+    return success();
+  }
+};
+
+struct ConvertTensorExtBitcastPattern
+    : public OpRewritePattern<TensorExt::BitCastOp> {
+  using OpRewritePattern<TensorExt::BitCastOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(TensorExt::BitCastOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op->getParentOfType<IREE::Flow::DispatchWorkgroupsOp>()) {
+      return failure();
+    }
+    rewriter.replaceOpWithNewOp<IREE::Flow::TensorBitCastOp>(
+        op, op.getResult().getType(), op.getSource(), op.getSourceDims(),
+        op.getResultDims());
     return success();
   }
 };
@@ -213,6 +231,20 @@ struct ConvertTensorConcatPattern : public OpRewritePattern<tensor::ConcatOp> {
         concatOffsets.push_back(outputShape[0]);
         outputShape[0] = affine::makeComposedFoldedAffineApply(
             rewriter, loc, addExpr, {outputShape[0], inputShape[0]});
+
+        // Any dims outside of concatenation axis (only `0` supported currently)
+        // should be equal. Fill in any dynamic dims in `outputShape` known from
+        // other inputs.
+        // Ex. concat([?,?], [?,12]) -> [?,12]
+        for (auto [dimIdx, outDim] :
+             llvm::drop_begin(llvm::enumerate(outputShape))) {
+          OpFoldResult inDim = inputShape[dimIdx];
+          bool outDimIsDynamic = isa<Value>(outDim);
+          bool inDimIsDynamic = isa<Value>(inDim);
+          if (outDimIsDynamic && !inDimIsDynamic) {
+            outputShape[dimIdx] = inDim;
+          }
+        }
       }
       inputShapes.emplace_back(std::move(inputShape));
     }
@@ -369,7 +401,7 @@ struct ConvertTensorReshapePattern : public OpRewritePattern<TensorReshapeOp> {
     SmallVector<Value> outputDynamicShapes;
     for (auto [resultShape, outputShp] : llvm::zip_equal(
              reshapeOp.getResultType().getShape(), outputShape[0])) {
-      if (!ShapedType::isDynamic(resultShape))
+      if (ShapedType::isStatic(resultShape))
         continue;
       outputDynamicShapes.push_back(getValueOrCreateConstantIndexOp(
           rewriter, reshapeOp.getLoc(), outputShp));
@@ -385,14 +417,15 @@ struct ConvertTensorReshapePattern : public OpRewritePattern<TensorReshapeOp> {
 
 void populateTensorToFlowConversionPatterns(MLIRContext *context,
                                             RewritePatternSet &patterns) {
-  patterns.insert<ConvertLinalgFillPattern, ConvertTensorBitcastPattern,
-                  ConvertTensorCastPattern, ConvertTensorConcatPattern,
-                  ConvertTensorExtractPattern, ConvertTensorExtractSlicePattern,
-                  ConvertTensorInsertSlicePattern, ConvertTensorInsertPattern,
-                  ConvertTensorFromElementsPattern,
-                  ConvertTensorDialectReshapeOpPattern,
-                  ConvertTensorReshapePattern<tensor::CollapseShapeOp>,
-                  ConvertTensorReshapePattern<tensor::ExpandShapeOp>>(context);
+  patterns
+      .insert<ConvertLinalgFillPattern, ConvertTensorBitcastPattern,
+              ConvertTensorExtBitcastPattern, ConvertTensorCastPattern,
+              ConvertTensorConcatPattern, ConvertTensorExtractPattern,
+              ConvertTensorExtractSlicePattern, ConvertTensorInsertSlicePattern,
+              ConvertTensorInsertPattern, ConvertTensorFromElementsPattern,
+              ConvertTensorDialectReshapeOpPattern,
+              ConvertTensorReshapePattern<tensor::CollapseShapeOp>,
+              ConvertTensorReshapePattern<tensor::ExpandShapeOp>>(context);
 }
 
 } // namespace mlir::iree_compiler::IREE::Flow

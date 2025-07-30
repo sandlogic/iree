@@ -72,15 +72,27 @@ int64_t getKSize(MMAIntrinsic intrinsic);
 MMASingleSubgroupLayout getSingleSubgroupLayout(MMAIntrinsic intrinsic,
                                                 MMAFragment fragment);
 
+MMASingleSubgroupLayout getSingleSubgroupLayout(MMAIntrinsic intrinsic,
+                                                MMAFragment fragment,
+                                                bool colMajor);
+
 MMASingleSubgroupLayout getSingleSubgroupLayout(VirtualMMAIntrinsic intrinsic,
                                                 MMAFragment fragment);
 
-MMASingleSubgroupLayout getSingleSubgroupLayout(MmaInterfaceAttr mmaKind,
-                                                MMAFragment fragment);
+MMASingleSubgroupLayout
+getSingleSubgroupLayout(IREE::Codegen::InnerTileDescAttrInterface mmaKind,
+                        MMAFragment fragment);
 
 /// Returns the name of the tilling `level`, as used in the `lowering_config`
 /// attribute.
 StringRef getTilingLevelName(GPU::TilingLevel level);
+
+//===----------------------------------------------------------------------===//
+// Implementations for operand promotion
+//===----------------------------------------------------------------------===//
+
+Value cacheSwizzlePromotionImpl(OpBuilder &builder, OpOperand &operand,
+                                Attribute attr);
 
 } // namespace mlir::iree_compiler::IREE::GPU
 
