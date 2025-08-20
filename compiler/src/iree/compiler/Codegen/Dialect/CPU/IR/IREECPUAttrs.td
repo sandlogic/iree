@@ -15,8 +15,8 @@ include "mlir/IR/AttrTypeBase.td"
 // iree_cpu.encoding_layout_attr
 //===----------------------------------------------------------------------===//
 
-def IREECPU_CPUEncodingLayoutAttr :
-    AttrDef<IREECPU_Dialect, "CPUEncodingLayout"> {
+def IREECPU_CPUEncodingLayoutAttr
+    : AttrDef<IREECPU_Dialect, "CPUEncodingLayout"> {
   let mnemonic = "cpu_encoding_layout";
   let summary = "The encoding layout attribute for CPU backends.";
   let description = [{
@@ -28,14 +28,27 @@ def IREECPU_CPUEncodingLayoutAttr :
 
   let assemblyFormat = "`<` struct(params) `>`";
 
-  let parameters = (ins
-    OptionalParameter<"DictionaryAttr", "Executable target configuration. It is "
-    "expected to be used in a pass scope, but not the final IR output.">:$configuration
-  );
+  let parameters =
+      (ins OptionalParameter<"DictionaryAttr",
+                             "Executable target configuration. It is "
+                             "expected to be used in a pass scope, but not the "
+                             "final IR output.">:$configuration);
 }
 
-def IREECPU_VMVXEncodingLayoutAttr :
-    AttrDef<IREECPU_Dialect, "VMVXEncodingLayout"> {
+def IREECPU_Exsleratev2EncodingLayoutAttr
+    : AttrDef<IREECPU_Dialect, "Exsleratev2EncodingLayout"> {
+  let mnemonic = "exsleratev2_encoding_layout";
+  let summary = "The encoding layout attribute for Exsleratev2 Backend.";
+  let assemblyFormat = "`<` struct(params) `>`";
+  let parameters =
+      (ins OptionalParameter<"DictionaryAttr",
+                             "Executable target configuration. It is "
+                             "expected to be used in a pass scope, but not the "
+                             "final IR output.">:$configuration);
+}
+
+def IREECPU_VMVXEncodingLayoutAttr
+    : AttrDef<IREECPU_Dialect, "VMVXEncodingLayout"> {
   let mnemonic = "vmvx_encoding_layout";
   let summary = "The encoding layout attribute for VMVX backend.";
   let description = [{
@@ -47,10 +60,11 @@ def IREECPU_VMVXEncodingLayoutAttr :
 
   let assemblyFormat = "`<` struct(params) `>`";
 
-  let parameters = (ins
-    OptionalParameter<"DictionaryAttr", "Executable target configuration. It is "
-    "expected to be used in a pass scope, but not the final IR output.">:$configuration
-  );
+  let parameters =
+      (ins OptionalParameter<"DictionaryAttr",
+                             "Executable target configuration. It is "
+                             "expected to be used in a pass scope, but not the "
+                             "final IR output.">:$configuration);
 }
 
 #endif // IREE_COMPILER_CODEGEN_DIALECT_CPU_IREECPUATTRS

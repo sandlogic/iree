@@ -1,0 +1,198 @@
+From 4060ae5322b779284fe8db5eccea228e8ccfc55d Mon Sep 17 00:00:00 2001
+From: Anirudh N <01fe21bec154@kletech.ac.in>
+Date: Wed, 20 Aug 2025 16:48:12 +0530
+Subject: [PATCH] Added registration for Encoding weights impl
+
+[Codegen] registered Exsleratev2 device in CPUEncodingExternalModels, enabling tiling pass pipeline for Exsleratev2
+---
+ .../Codegen/Dialect/CPU/IR/IREECPUAttrs.td    |  38 ++++---
+ .../CPUEncodingExternalModels.cpp             | 101 ++++++++++++++++++
+ 2 files changed, 127 insertions(+), 12 deletions(-)
+
+diff --git a/compiler/src/iree/compiler/Codegen/Dialect/CPU/IR/IREECPUAttrs.td b/compiler/src/iree/compiler/Codegen/Dialect/CPU/IR/IREECPUAttrs.td
+index 9d89b8e8ad..4fe90b5e03 100644
+--- a/compiler/src/iree/compiler/Codegen/Dialect/CPU/IR/IREECPUAttrs.td
++++ b/compiler/src/iree/compiler/Codegen/Dialect/CPU/IR/IREECPUAttrs.td
+@@ -15,8 +15,8 @@ include "mlir/IR/AttrTypeBase.td"
+ // iree_cpu.encoding_layout_attr
+ //===----------------------------------------------------------------------===//
+ 
+-def IREECPU_CPUEncodingLayoutAttr :
+-    AttrDef<IREECPU_Dialect, "CPUEncodingLayout"> {
++def IREECPU_CPUEncodingLayoutAttr
++    : AttrDef<IREECPU_Dialect, "CPUEncodingLayout"> {
+   let mnemonic = "cpu_encoding_layout";
+   let summary = "The encoding layout attribute for CPU backends.";
+   let description = [{
+@@ -28,14 +28,27 @@ def IREECPU_CPUEncodingLayoutAttr :
+ 
+   let assemblyFormat = "`<` struct(params) `>`";
+ 
+-  let parameters = (ins
+-    OptionalParameter<"DictionaryAttr", "Executable target configuration. It is "
+-    "expected to be used in a pass scope, but not the final IR output.">:$configuration
+-  );
++  let parameters =
++      (ins OptionalParameter<"DictionaryAttr",
++                             "Executable target configuration. It is "
++                             "expected to be used in a pass scope, but not the "
++                             "final IR output.">:$configuration);
+ }
+ 
+-def IREECPU_VMVXEncodingLayoutAttr :
+-    AttrDef<IREECPU_Dialect, "VMVXEncodingLayout"> {
++def IREECPU_Exsleratev2EncodingLayoutAttr
++    : AttrDef<IREECPU_Dialect, "Exsleratev2EncodingLayout"> {
++  let mnemonic = "exsleratev2_encoding_layout";
++  let summary = "The encoding layout attribute for Exsleratev2 Backend.";
++  let assemblyFormat = "`<` struct(params) `>`";
++  let parameters =
++      (ins OptionalParameter<"DictionaryAttr",
++                             "Executable target configuration. It is "
++                             "expected to be used in a pass scope, but not the "
++                             "final IR output.">:$configuration);
++}
++
++def IREECPU_VMVXEncodingLayoutAttr
++    : AttrDef<IREECPU_Dialect, "VMVXEncodingLayout"> {
+   let mnemonic = "vmvx_encoding_layout";
+   let summary = "The encoding layout attribute for VMVX backend.";
+   let description = [{
+@@ -47,10 +60,11 @@ def IREECPU_VMVXEncodingLayoutAttr :
+ 
+   let assemblyFormat = "`<` struct(params) `>`";
+ 
+-  let parameters = (ins
+-    OptionalParameter<"DictionaryAttr", "Executable target configuration. It is "
+-    "expected to be used in a pass scope, but not the final IR output.">:$configuration
+-  );
++  let parameters =
++      (ins OptionalParameter<"DictionaryAttr",
++                             "Executable target configuration. It is "
++                             "expected to be used in a pass scope, but not the "
++                             "final IR output.">:$configuration);
+ }
+ 
+ #endif // IREE_COMPILER_CODEGEN_DIALECT_CPU_IREECPUATTRS
+diff --git a/compiler/src/iree/compiler/Codegen/ExternalInterfaces/CPUEncodingExternalModels.cpp b/compiler/src/iree/compiler/Codegen/ExternalInterfaces/CPUEncodingExternalModels.cpp
+index 9cc5a12a04..7b301d90bb 100644
+--- a/compiler/src/iree/compiler/Codegen/ExternalInterfaces/CPUEncodingExternalModels.cpp
++++ b/compiler/src/iree/compiler/Codegen/ExternalInterfaces/CPUEncodingExternalModels.cpp
+@@ -801,6 +801,103 @@ struct VMVXHostSerializableEncodingAttrInterface final
+   }
+ };
+ 
++// Interface for Exsleratev2
++struct Exsleratev2DeviceEncodingLayoutResolverAttrInterface
++    : public DeviceEncodingLayoutResolverExternalModelBase<
++          Exsleratev2DeviceEncodingLayoutResolverAttrInterface, Exsleratev2EncodingLayoutAttr> {
++  DictionaryAttr getConfiguration(Attribute attr) const {
++    return cast<Exsleratev2EncodingLayoutAttr>(attr).getConfiguration();
++  }
++
++  MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
++                                              RankedTensorType type) const {
++    auto layoutAttr = cast<Exsleratev2EncodingLayoutAttr>(attr);
++
++    auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
++        type.getEncoding());
++
++    MaterializeEncodingInfo info;
++    if (!encoding) {
++      return info;
++    }
++
++    // We only know about contractions with {Batch, M, N, K} <= 1 at the moment.
++    auto cDims = getEncodingContractionDims(encoding);
++    if (failed(cDims) || cDims->batch.size() > 1 || cDims->m.size() > 1 ||
++        cDims->n.size() > 1 || cDims->k.size() > 1) {
++      return info;
++    }
++
++    SmallVector<TileMxNxK> enumeratedTileMxNxK =
++        enumerateCPUMatmulTiles(encoding, layoutAttr.getConfiguration());
++    if (enumeratedTileMxNxK.empty()) {
++      return info;
++    }
++    auto narrowDim = IREE::Encoding::getMatmulNarrowDim(encoding);
++    // Choose a final matmul TileMxNxK from the above-enumarated tile shapes,
++    // taking narrow dimensions into account.
++    TileMxNxK chosenTileMxNxK = chooseMatmulTile(
++        enumeratedTileMxNxK, narrowDim, encoding.getRoundDimsToArray());
++    FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
++        getEncodingInfoForMatmul(encoding, chosenTileMxNxK);
++    if (failed(maybeEncodingInfo)) {
++      return info;
++    }
++    info = std::move(maybeEncodingInfo.value());
++    if (Encoding::isNarrowNResult(encoding)) {
++      transposeInPlace(info);
++    }
++    return info;
++  }
++
++  Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
++                     TypeRange convertedResTypes,
++                     ValueRange convertedOperands) const {
++    auto layoutAttr = cast<Exsleratev2EncodingLayoutAttr>(attr);
++    auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
++    if (!linalgOp) {
++      return nullptr;
++    }
++
++    FailureOr<Operation *> newOp = lowerContractionOpWithEncoding(
++        b, linalgOp, convertedOperands,
++        cast<IREE::Codegen::LayoutAttrInterface>(layoutAttr));
++    return newOp.value_or(nullptr);
++  }
++};
++
++struct Exsleratev2HostEncodingLayoutResolverAttrInterface final
++    : IREE::Encoding::EncodingLayoutResolverAttrInterface::ExternalModel<
++          Exsleratev2HostEncodingLayoutResolverAttrInterface, Exsleratev2EncodingLayoutAttr> {
++  Attribute cloneWithSimplifiedConfig(Attribute attr,
++                                      DictionaryAttr config) const {
++    MLIRContext *ctx = attr.getContext();
++    SmallVector<NamedAttribute> configItems;
++    storeNamedAttrIfPresent(configItems, config, "cpu_features");
++    storeNamedAttrIfPresent(configItems, config, "target_triple");
++    storeNamedAttrIfPresent(configItems, config, "ukernels");
++    return Exsleratev2EncodingLayoutAttr::get(ctx,
++                                      DictionaryAttr::get(ctx, configItems));
++  }
++
++  Attribute getLayout(Attribute attr, RankedTensorType type) const {
++    MLIRContext *ctx = attr.getContext();
++    return Exsleratev2EncodingLayoutAttr::get(ctx, getLayoutImpl(attr, type));
++  }
++};
++
++struct Exsleratev2HostSerializableEncodingAttrInterface final
++    : IREE::Encoding::SerializableEncodingAttrInterface::ExternalModel<
++          Exsleratev2HostSerializableEncodingAttrInterface, Exsleratev2EncodingLayoutAttr> {
++
++  Value calculateStorageSizeInBytes(Attribute attr, Location loc,
++                                    OpBuilder &builder, RankedTensorType type,
++                                    ValueRange dynamicDims) const {
++    return calculateStorageSizeInBytesImpl(attr, loc, builder, type,
++                                           dynamicDims);
++  }
++};
++
+ } // namespace
+ 
+ void registerCPUEncodingExternalModels(DialectRegistry &registry) {
+@@ -814,6 +911,10 @@ void registerCPUEncodingExternalModels(DialectRegistry &registry) {
+             VMVXDeviceEncodingLayoutResolverAttrInterface,
+             VMVXHostEncodingLayoutResolverAttrInterface,
+             VMVXHostSerializableEncodingAttrInterface>(*ctx);
++        IREE::CPU::Exsleratev2EncodingLayoutAttr::attachInterface<
++            Exsleratev2DeviceEncodingLayoutResolverAttrInterface,
++            Exsleratev2HostEncodingLayoutResolverAttrInterface,
++            Exsleratev2HostSerializableEncodingAttrInterface>(*ctx);
+       });
+ }
+ 
+-- 
+2.48.1
+
