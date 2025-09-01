@@ -121,4 +121,16 @@ def IREECPU_VMVXEncodingResolverAttr :
   );
 }
 
+def IREECPU_Exsleratev2EncodingResolverAttr
+    : AttrDef<IREECPU_Dialect, "Exsleratev2EncodingResolver"> {
+  let mnemonic = "exsleratev2_encoding_resolver";
+  let summary = "The encoding resolver attribute for Exsleratev2 Backend.";
+  let assemblyFormat = "`<` struct(params) `>`";
+  let parameters =
+      (ins OptionalParameter<"DictionaryAttr",
+                             "Executable target configuration. It is "
+                             "expected to be used in a pass scope, but not the "
+                             "final IR output.">:$configuration);
+}
+
 #endif // IREE_COMPILER_CODEGEN_DIALECT_CPU_IREECPUATTRS

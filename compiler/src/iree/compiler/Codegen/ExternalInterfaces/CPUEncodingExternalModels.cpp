@@ -903,6 +903,111 @@ struct VMVXSerializableAttr final
   }
 };
 
+// Interface for Exsleratev2
+struct Exsleratev2EncodingPackedLayoutMaterializerAttr
+    : public PackedLayoutMaterializerAttrExternalModelBase<
+          Exsleratev2EncodingPackedLayoutMaterializerAttr,
+          Exsleratev2EncodingResolverAttr> {
+  DictionaryAttr getConfiguration(Attribute attr) const {
+    return cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
+  }
+
+  MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
+                                              RankedTensorType type) const {
+    auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
+
+    auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
+        type.getEncoding());
+
+    MaterializeEncodingInfo info;
+    if (!encoding) {
+      return info;
+    }
+
+    // We only know about contractions with {Batch, M, N, K} <= 1 at the moment.
+    auto cDims = getEncodingContractionDims(encoding);
+    if (failed(cDims) || cDims->batch.size() > 1 || cDims->m.size() > 1 ||
+        cDims->n.size() > 1 || cDims->k.size() > 1) {
+      return info;
+    }
+
+    SmallVector<TileMxNxK> enumeratedTileMxNxK =
+        enumerateCPUMatmulTiles(encoding, layoutAttr.getConfiguration());
+    if (enumeratedTileMxNxK.empty()) {
+      return info;
+    }
+    auto narrowDim = IREE::Encoding::getPo2MatmulNarrowDim(encoding);
+    TileMxNxK chosenTileMxNxK =
+        chooseMatmulTile(enumeratedTileMxNxK, narrowDim);
+    FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
+        getEncodingInfoForMatmul(encoding, chosenTileMxNxK);
+    if (failed(maybeEncodingInfo)) {
+      return info;
+    }
+    info = std::move(maybeEncodingInfo.value());
+    if (IREE::Encoding::isNarrowNResult(encoding)) {
+      transposeInPlace(info);
+    }
+    FailureOr<IREE::Codegen::ScalableTileFlags> scalableFlags =
+        getScalableTileFlags(*cDims, encoding, layoutAttr.getConfiguration());
+    if (succeeded(scalableFlags)) {
+      info.scalableTiles = std::move(scalableFlags);
+    }
+    return info;
+  }
+};
+
+struct Exsleratev2EncodingResolverMaterializerAttr final
+    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+          Exsleratev2EncodingResolverMaterializerAttr,
+          Exsleratev2EncodingResolverAttr> {
+
+  Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
+                     TypeRange convertedResTypes,
+                     ValueRange convertedOperands) const {
+    auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
+    auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
+    if (!linalgOp) {
+      return nullptr;
+    }
+
+    FailureOr<Operation *> newOp = lowerContractionOpWithEncoding(
+        b, linalgOp, convertedOperands,
+        cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
+    return newOp.value_or(nullptr);
+  }
+};
+
+struct Exsleratev2LayoutResolverAttr final
+    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+          Exsleratev2LayoutResolverAttr, Exsleratev2EncodingResolverAttr> {
+  Attribute cloneWithSimplifiedConfig(Attribute attr,
+                                      DictionaryAttr config) const {
+    MLIRContext *ctx = attr.getContext();
+    SmallVector<NamedAttribute> configItems;
+    storeNamedAttrIfPresent(configItems, config, "ukernels");
+    return Exsleratev2EncodingResolverAttr::get(
+        ctx, DictionaryAttr::get(ctx, configItems));
+  }
+
+  Attribute getLayout(Attribute attr, RankedTensorType type) const {
+    MLIRContext *ctx = attr.getContext();
+    return Exsleratev2EncodingResolverAttr::get(
+        ctx, getPackedLayoutImpl(attr, type, /*addEncodingAttr=*/true));
+  }
+};
+
+struct Exsleratev2SerializableAttr final
+    : IREE::Encoding::SerializableAttr::ExternalModel<
+          Exsleratev2SerializableAttr, Exsleratev2EncodingResolverAttr> {
+  Value calculateStorageSizeInBytes(Attribute attr, Location loc,
+                                    OpBuilder &builder, RankedTensorType type,
+                                    ValueRange dynamicDims) const {
+    return calculatePackedStorageSizeInBytesImpl(attr, loc, builder, type,
+                                                 dynamicDims);
+  }
+};
+
 } // namespace
 
 void registerCPUEncodingExternalModels(DialectRegistry &registry) {
@@ -916,6 +1021,10 @@ void registerCPUEncodingExternalModels(DialectRegistry &registry) {
             VMVXEncodingPackedLayoutMaterializerAttr,
             VMVXEncodingResolverMaterializerAttr, VMVXLayoutResolverAttr,
             VMVXSerializableAttr>(*ctx);
+        IREE::CPU::Exsleratev2EncodingResolverAttr::attachInterface<
+            Exsleratev2EncodingPackedLayoutMaterializerAttr,
+            Exsleratev2EncodingResolverMaterializerAttr,
+            Exsleratev2LayoutResolverAttr, Exsleratev2SerializableAttr>(*ctx);
       });
 }
 
