@@ -369,6 +369,42 @@ def IREECodegen_LoweringConfigAttrInterface :
     >,
     InterfaceMethod<
       /*desc=*/[{
+        Returns the tile sizes of all the vector level tiling, including
+        parallel and reduction dimensions.
+
+        Usually, the tile sizes for parallel dimensions and reduction dimensions
+        are split for different tiling and fusion purposes. The interface method
+        returns the tile sizes for vector level, as only lowering config knows
+        how to compose the list.
+
+        Returns std::nullopt if it fails to construct vector tile sizes.
+      }],
+      /*retTy=*/"::std::optional<::llvm::SmallVector<int64_t>>",
+      /*methodName=*/"getVectorSizes",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return ::std::nullopt;
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Returns the vector scalable flags sizes for all the vector dimensions.
+        Similar to the `getVectorSizes` method, but it is for scalable flags.
+
+        The default implementation returns an empty list, which means that there
+        are no scalable flags at all.
+      }],
+      /*retTy=*/"::llvm::SmallVector<bool>",
+      /*methodName=*/"getVectorScalableFlags",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return {};
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/[{
         Gets the name of the custom lowering strategy to apply to the annotated
         operation.
       }],
@@ -513,6 +549,58 @@ def IREECodegen_UKernelProviderInterface :
         return failure();
       }]
     >,
+    InterfaceMethod<
+      /*desc=*/[{
+        Creates and replaces the |contextual_op| with a ukernel referenced by
+        |name| backed by this attribute. Takes |target_configuration| in
+        case the provider wants to make any feature specific decisions for
+        which implementation to provide. It takes in |inputs|, |outputs| and
+        |other_operands| and adds to it a few context-specific as well as
+        backend specific implementations to create the ukernel op.
+        Returning std::nullopt indicates falling back to default implementation.
+        Otherwise success/failure indicates the status of the custom replacement
+        implementation.
+      }],
+      /*retTy=*/"std::optional<::mlir::LogicalResult>",
+      /*methodName=*/"createAndReplaceWithUkernelOp",
+      /*args=*/(ins "::mlir::RewriterBase&":$b,
+                    "::mlir::StringRef":$name,
+                    "::mlir::DictionaryAttr":$target_configuration,
+                    "::mlir::Operation *":$contextual_op,
+                    "::llvm::SmallVectorImpl<::mlir::Value>&":$inputs,
+                    "::llvm::SmallVectorImpl<::mlir::Value>&":$outputs,
+                    "::llvm::SmallVectorImpl<::mlir::Value>&":$other_operands),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return failure();
+      }]
+    >,
+  ];
+}
+
+def IREECodegen_TargetInfoAttrInterface :
+    AttrInterface<"TargetInfoAttrInterface"> {
+  let cppNamespace = "::mlir::iree_compiler::IREE::Codegen";
+  let description = [{
+    An interface that allows extracting target specific information from target
+    attributes.
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/[{
+        Get the maximum workgroup count allowed on the target, returned as [x, y, z].
+
+        If there is no limit, then it is expected to return ShapedType::kDynamic.
+      }],
+      /*retTy=*/"std::array<int64_t, 3>",
+      /*methodName=*/"getMaximumWorkgroupCount",
+      /*args=*/(ins),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return {ShapedType::kDynamic, ShapedType::kDynamic, ShapedType::kDynamic};
+      }]
+    >
   ];
 }
 

@@ -97,7 +97,6 @@ iree_cc_library(
     "ROCDLLowerExecutableTarget.cpp"
     "ROCDLPrefetching.cpp"
     "ROCDLSelectLoweringStrategy.cpp"
-    "ROCDLUseBufferInstructions.cpp"
     "TestLLVMGPUQueryMMAPass.cpp"
     "Verifiers.cpp"
   DEPS
@@ -142,6 +141,7 @@ iree_cc_library(
     MLIRMathDialect
     MLIRMathToLLVM
     MLIRMathToROCDL
+    MLIRMathTransforms
     MLIRMemRefDialect
     MLIRMemRefToLLVM
     MLIRMemRefTransforms

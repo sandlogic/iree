@@ -306,14 +306,25 @@ def IREEGPU_VirtualMMAAttr :
     These interleaving and/or unrolling changes in the layout is especially
     useful to coalesce reads from shared memory to register or align layouts
     in a chained-matmul operation.
+
+    If set to true (similar to MMAAttr), |col_major| indicates the computation
+    is perfomed as below:
+
+    ```
+      C^T += B^T x A^T
+    ```
   }];
 
-  let assemblyFormat = "`<` struct(params) `>`";
+  let assemblyFormat = "`<` $intrinsic (`,` `col_major` `=` $col_major^)? `>`";
 
   let parameters = (ins
-    EnumParameter<IREEGPU_VirtualMMAIntrinsic>:$intrinsic
+    EnumParameter<IREEGPU_VirtualMMAIntrinsic>:$intrinsic,
+    DefaultValuedParameter<"bool", "false">:$col_major
   );
 
+  let builders = [
+    AttrBuilder<(ins "VirtualMMAIntrinsic":$intrinsic)>
+  ];
   let extraClassDeclaration = [{
     int64_t getBlockSize() const;
 
@@ -498,10 +509,10 @@ def IREEGPU_TargetWgpAttr : AttrDef<IREEGPU_Dialect, "TargetWgp"> {
     "ComputeBitwidthsAttr":$compute,
     "StorageBitwidthsAttr":$storage,
     "SubgroupOpsAttr":$subgroup,
-    "DotProductOpsAttr":$dot,
+    DefaultValuedParameter<"DotProductOpsAttr", "DotProductOpsAttr::get($_ctxt, DotProductOps::None)">:$dot,
     // MMAs available on this target. Heuristic MMA selection runs is order.
-    "MMAOpsArrayAttr":$mma,
-    "ScaledMMAOpsArrayAttr":$scaled_mma,
+    DefaultValuedParameter<"MMAOpsArrayAttr", "MMAOpsArrayAttr::get($_ctxt, {})">:$mma,
+    DefaultValuedParameter<"ScaledMMAOpsArrayAttr", "ScaledMMAOpsArrayAttr::get($_ctxt, {})">:$scaled_mma,
 
     // Limits
     // Supported subgroup size choices.
@@ -556,6 +567,10 @@ def IREEGPU_TargetChipAttr : AttrDef<IREEGPU_Dialect, "TargetChip"> {
 
     // An optional SKU identifier to distinguish different models.
     OptionalParameter<"StringAttr">:$sku,
+    // An optional memory bandwidth in TB/s.
+    OptionalParameter<"FloatAttr">:$memory_bandwidth_tbps,
+    // An optional performance dictionary in TFLOPS.
+    OptionalParameter<"DictionaryAttr">:$perf_tflops,
     // An optional extra dict
     // This field allows to inject more features/limits not supported in the
     // above list for better flexibility.
@@ -569,7 +584,9 @@ def IREEGPU_TargetChipAttr : AttrDef<IREEGPU_Dialect, "TargetChip"> {
 // GPU Target Attributes
 //===----------------------------------------------------------------------===//
 
-def IREEGPU_TargetAttr : AttrDef<IREEGPU_Dialect, "Target"> {
+def IREEGPU_TargetAttr : AttrDef<IREEGPU_Dialect, "Target", [
+  DeclareAttrInterfaceMethods<IREECodegen_TargetInfoAttrInterface, [
+    "getMaximumWorkgroupCount"]>]> {
   let summary = [{Full GPU target attribute.}];
   let description = [{
     This attributes describes a full GPU target. It contains a few fields:

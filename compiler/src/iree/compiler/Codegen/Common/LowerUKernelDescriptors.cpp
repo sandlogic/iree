@@ -78,15 +78,10 @@ static void populateCastConversions(TypeConverter &converter) {
 //===----------------------------------------------------------------------===//
 
 /// Converts an operation to `iree_codegen.ukernel.generic`.
-///
-/// NOTE: This is primarily an example implementation with inherent limitations.
-/// The generic approach used here cannot fulfill the requirements of all
-/// ukernel implementations. Real ukernels often need additional
-/// context-specific operands (e.g., runtime shapes or algorithm-specific
-/// parameters) that cannot be generically inferred from the source operation
-/// alone.
-static LogicalResult convertToUKernelGeneric(RewriterBase &rewriter,
-                                             Operation *op, StringRef name) {
+static LogicalResult
+convertToUKernelGeneric(RewriterBase &rewriter, Operation *op, StringRef name,
+                        IREE::Codegen::UKernelProviderInterface &provider,
+                        DictionaryAttr targetConfiguration) {
   SmallVector<Value> tensorInputs;
   SmallVector<Value> tensorOutputs;
   SmallVector<Value> otherOperands;
@@ -113,7 +108,18 @@ static LogicalResult convertToUKernelGeneric(RewriterBase &rewriter,
       }
     }
   }
+
   rewriter.setInsertionPoint(op);
+  if (provider) {
+    std::optional<LogicalResult> retVal =
+        provider.createAndReplaceWithUkernelOp(
+            rewriter, name, targetConfiguration, op, tensorInputs,
+            tensorOutputs, otherOperands);
+    if (retVal)
+      return retVal.value();
+  }
+  // Default ukernel generic op is created when a provider doesn't exist or when
+  // the provider doesn't implement the replacement method.
   rewriter.replaceOpWithNewOp<IREE::Codegen::UKernelGenericOp>(
       op, op->getResults().getTypes(), name, tensorInputs, tensorOutputs,
       otherOperands, DictionaryAttr(),
@@ -126,7 +132,8 @@ static LogicalResult convertToUKernelGeneric(RewriterBase &rewriter,
 /// operands/results and the function's arguments/return types.
 static LogicalResult castAndInline(RewriterBase &rewriter, Operation *op,
                                    FunctionOpInterface targetFunction) {
-  ValueRange inputs = op->getOperands();
+  OpBuilder::InsertionGuard guard(rewriter);
+  SmallVector<Value> inputs(op->getOperands());
   ValueRange outputs = op->getResults();
 
   // Verify that the function argument and result lengths match the inputs and
@@ -148,7 +155,8 @@ static LogicalResult castAndInline(RewriterBase &rewriter, Operation *op,
   populateCastConversions<tensor::CastOp, RankedTensorType>(converter);
   populateCastConversions<memref::CastOp, MemRefType>(converter);
 
-  for (auto [input, type] :
+  rewriter.setInsertionPoint(op);
+  for (auto &&[input, type] :
        llvm::zip_equal(inputs, targetFunction.getArgumentTypes())) {
     if (input.getType() != type) {
       Value newInput = converter.materializeSourceConversion(
@@ -247,7 +255,8 @@ processUKernelKind(Operation *root, IREE::Codegen::UKernelArgumentKind kind) {
   for (auto [op, name] : opsToConvert) {
     switch (kind) {
     case IREE::Codegen::UKernelArgumentKind::Bitcode: {
-      if (failed(convertToUKernelGeneric(rewriter, op, name))) {
+      if (failed(convertToUKernelGeneric(rewriter, op, name, provider,
+                                         targetAttr.getConfiguration()))) {
         return op->emitOpError()
                << "failed to convert to ukernel.generic with name " << name;
       }
@@ -259,8 +268,15 @@ processUKernelKind(Operation *root, IREE::Codegen::UKernelArgumentKind kind) {
       FailureOr<Operation *> maybeTargetFunction = provider.getMLIRUKernel(
           name, targetAttr.getConfiguration(), annotationSite);
       if (failed(maybeTargetFunction) || !*maybeTargetFunction) {
-        return op->emitOpError()
-               << "failed to retrieve a uKernel with name " << name;
+        // If not found at the annotation site, look in the first ModuleOp
+        // parent as well.
+        auto moduleParent = op->getParentOfType<ModuleOp>();
+        maybeTargetFunction = provider.getMLIRUKernel(
+            name, targetAttr.getConfiguration(), moduleParent);
+        if (failed(maybeTargetFunction) || !*maybeTargetFunction) {
+          return op->emitOpError()
+                 << "failed to retrieve a uKernel with name " << name;
+        }
       }
       auto targetFunction = dyn_cast<FunctionOpInterface>(*maybeTargetFunction);
       if (!targetFunction) {

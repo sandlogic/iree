@@ -19,11 +19,10 @@
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/Support/LogicalResult.h"
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
-#include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -269,6 +268,16 @@ static FailureOr<Operation *> lowerGenericOpWithEncoding(
 
   SmallVector<AffineMap> packedIndexingMaps;
   for (OpOperand *inputOperand : genericOp.getDpsInputOperands()) {
+    AffineMap inputMap = genericOp.getMatchingIndexingMap(inputOperand);
+    // Special case for 0D inputs. They will resolve to identity layout, so
+    // skip the logic to compute the packed indexing map.
+    if (inputMap.getNumResults() == 0) {
+      auto packedInputMap = AffineMap::get(
+          /*dimCount=*/iteratorTypes.size(), /*symbolCount=*/0, {},
+          rewriter.getContext());
+      packedIndexingMaps.push_back(packedInputMap);
+      continue;
+    }
     // Step 2: Retrieve the encoding for every input operand and perform the
     // outer dimension permutation, inner dimension expansion and permutation,
     // swizzle expansion and swizzle permutation.
@@ -310,7 +319,6 @@ static FailureOr<Operation *> lowerGenericOpWithEncoding(
     }
     ArrayRef<int64_t> innerDimsPos = materializeEncodingInfo.innerDimsPos;
     ArrayRef<int64_t> outerDimsPerm = materializeEncodingInfo.outerDimsPerm;
-    AffineMap inputMap = genericOp.getMatchingIndexingMap(inputOperand);
     // Permute result dims to the input packed domain, and map dims to the
     // output packed domain.
     SmallVector<int64_t> packedResultDims = llvm::map_to_vector(
@@ -869,6 +877,25 @@ public:
   }
 };
 
+static bool isRankedTensorTypeWithEncoding(Type type) {
+  auto rankedTensorType = dyn_cast<RankedTensorType>(type);
+  if (!rankedTensorType) {
+    return false;
+  }
+  return rankedTensorType.getEncoding() ? true : false;
+}
+
+struct MaterializeFuncReturnOp final
+    : public OpConversionPattern<func::ReturnOp> {
+  using OpConversionPattern<func::ReturnOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(func::ReturnOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<func::ReturnOp>(op, adaptor.getOperands());
+    return success();
+  }
+};
+
 } // namespace
 
 void populateMaterializeEncodingPatterns(
@@ -904,6 +931,10 @@ void populateMaterializeEncodingPatterns(
           return true;
         return resultType == typeConverter.convertType(resultType);
       });
+  target.addDynamicallyLegalOp<func::ReturnOp>([](func::ReturnOp returnOp) {
+    return !llvm::any_of(returnOp.getOperandTypes(),
+                         isRankedTensorTypeWithEncoding);
+  });
 
   patterns.insert<MaterializeContractionOp, SetEncodingOpLoweringConversion,
                   UnsetEncodingOpLoweringConversion,
@@ -913,7 +944,8 @@ void populateMaterializeEncodingPatterns(
                   MaterializeOptimizationBarrierOp,
                   MaterializeTensorExtDispatchTensorLoadOp,
                   MaterializeTensorExtDispatchTensorStoreOp,
-                  MaterializeInterfaceBindingEncoding>(typeConverter, context);
+                  MaterializeInterfaceBindingEncoding, MaterializeFuncReturnOp>(
+      typeConverter, context);
 };
 
 } // namespace mlir::iree_compiler

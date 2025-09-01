@@ -10,6 +10,7 @@
 #include "iree/compiler/Codegen/Dialect/GPU/IR/GPULoweringConfigUtils.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUAttrs.h"
 #include "iree/compiler/Codegen/Dialect/GPU/IR/IREEGPUEnums.h"
+#include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/dialects/iree_gpu.h"
 #include "mlir-c/BuiltinAttributes.h"
 #include "mlir-c/IR.h"
@@ -353,9 +354,9 @@ MlirAttribute ireeGPULoweringConfigAttrGetMmaKind(MlirAttribute attr) {
 
 ireeGPUMMASingleSubgroupLayout
 ireeGPUGetSingleSubgroupLayout(MlirAttribute attr, uint32_t fragment) {
-  assert(ireeAttributeIsAGPUMMAIntrinsicAttr(attr) ||
-         ireeAttributeIsAGPUVirtualMMAIntrinsicAttr(attr) &&
-             "Expected MMA or VirtualMMA Intrinsic");
+  assert((ireeAttributeIsAGPUMMAIntrinsicAttr(attr) ||
+          ireeAttributeIsAGPUVirtualMMAIntrinsicAttr(attr)) &&
+         "Expected MMA or VirtualMMA Intrinsic");
 
   mlir::Attribute baseAttr = unwrap(attr);
   mlir::iree_compiler::IREE::GPU::MMASingleSubgroupLayout layout;
@@ -386,4 +387,38 @@ ireeGPUGetSingleSubgroupLayout(MlirAttribute attr, uint32_t fragment) {
   result.tstrides = wrap(builder.getI64ArrayAttr(layout.tstrides));
   result.element = wrap(builder.getI64ArrayAttr(layout.element));
   return result;
+}
+
+ireeGPUTargetInfo
+ireeHALExecutableTargetAttrGetGPUTargetInfo(MlirAttribute attr) {
+  assert(!mlirAttributeIsNull(attr) && "attr cannot be null");
+  auto executableTargetAttr =
+      llvm::cast<mlir::iree_compiler::IREE::HAL::ExecutableTargetAttr>(
+          unwrap(attr));
+
+  ireeGPUTargetInfo targetInfo = {};
+  mlir::MLIRContext *context = executableTargetAttr.getContext();
+  mlir::iree_compiler::IREE::GPU::TargetAttr gpuTargetAttr =
+      mlir::iree_compiler::getGPUTargetAttr(context, executableTargetAttr);
+
+  if (!gpuTargetAttr) {
+    return targetInfo;
+  }
+
+  targetInfo.arch =
+      wrap(mlir::StringAttr::get(context, gpuTargetAttr.getArch()));
+  mlir::iree_compiler::IREE::GPU::TargetWgpAttr wgpAttr =
+      gpuTargetAttr.getWgp();
+  mlir::Builder builder = mlir::OpBuilder(context);
+
+  targetInfo.subgroupSizeChoices =
+      wrap(builder.getI32ArrayAttr(wgpAttr.getSubgroupSizeChoices()));
+  targetInfo.maxWorkgroupSizes =
+      wrap(builder.getI32ArrayAttr(wgpAttr.getMaxWorkgroupSizes()));
+
+  targetInfo.maxThreadCountPerWorkgroup =
+      wgpAttr.getMaxThreadCountPerWorkgroup();
+  targetInfo.maxWorkgroupMemoryBytes = wgpAttr.getMaxWorkgroupMemoryBytes();
+
+  return targetInfo;
 }
