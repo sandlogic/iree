@@ -86,6 +86,8 @@ static bool hasMatmulLikeBody(linalg::LinalgOp linalgOp) {
 ///
 /// TODO(#16176): Loosen restrictions on contraction ops once data tiling
 /// can support more cases.
+
+/*similar function for covolution-interface*/
 static bool isSupportedContractionOp(linalg::LinalgOp linalgOp) {
   if (!linalgOp.hasPureTensorSemantics()) {
     return false;
@@ -134,6 +136,7 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
       return WalkResult::interrupt();
     }
     auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+    /* update for convolution*/
     if (linalgOp && isSupportedContractionOp(linalgOp)) {
       candidates.push_back(op);
       return WalkResult::advance();

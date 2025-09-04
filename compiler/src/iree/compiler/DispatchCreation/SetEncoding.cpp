@@ -55,6 +55,23 @@ static Value unsetEncoding(OpBuilder &builder, Location loc, Value source,
       loc, unsetEncodingReturnType, source, dynamicSizesVec);
 }
 
+static Type getConvolutionInputTypeWithSignedness(OpBuilder &builder,
+                                                  linalg::LinalgOp linalgOp,
+                                                  OpOperand *operand) {
+  assert(linalg::isaConvolutionOpInterface(linalgOp));
+  assert(operand->getOwner() == linalgOp.getOperation());
+  auto elemType = getElementTypeOrSelf(operand->get().getType());
+  // Infer if unsigned from body ops
+  Value blockArg = linalgOp.getMatchingBlockArgument(operand);
+  for (auto bodyCastOp : blockArg.getParentBlock()->getOps<arith::ExtUIOp>()) {
+    if (bodyCastOp->getOperand(0) == blockArg) {
+      return builder.getIntegerType(elemType.getIntOrFloatBitWidth(),
+                                    /*isSigned=*/false);
+    }
+  }
+  return elemType;
+}
+
 /// Given a LinalgOp and one of its OpOperands, return the element type,
 /// inferring unsignedness from the body of the LinalgOp
 static Type getContractionInputTypeWithSignedness(OpBuilder &builder,
@@ -84,6 +101,55 @@ getDataTilingCandidates(FunctionOpInterface funcOp) {
     result.push_back(op);
   });
   return result;
+}
+
+static LogicalResult
+setConvDataTilingEncodings(RewriterBase &rewriter, linalg::LinalgOp linalgOp,
+                           EncodingOptions encodingOption) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(linalgOp);
+
+  assert(linalg::isaConvolutionOpInterface(linalgOp) &&
+         "expected a convolution op");
+
+  // Grab convolution operands
+  Value lhs = linalgOp.getDpsInputOperand(0)->get(); // input
+  Value rhs = linalgOp.getDpsInputOperand(1)->get(); // filter
+  Value out = linalgOp.getDpsInitOperand(0)->get();  // output
+
+  // Derive element types with signedness awareness
+  Type lhsElemType = getConvolutionInputTypeWithSignedness(
+      rewriter, linalgOp, linalgOp.getDpsInputOperand(0));
+  Type rhsElemType = getConvolutionInputTypeWithSignedness(
+      rewriter, linalgOp, linalgOp.getDpsInputOperand(1));
+  Type outElemType = getConvolutionInputTypeWithSignedness(
+      rewriter, linalgOp, linalgOp.getDpsInitOperand(0));
+
+  if (!lhsElemType || !rhsElemType || !outElemType)
+    return failure();
+
+  SmallVector<Type> elemTypes = {lhsElemType, rhsElemType, outElemType};
+  FailureOr<SmallVector<int64_t>> maybeIterationSizes =
+      linalgOp.getStaticLoopRanges();
+  if (failed(maybeIterationSizes)) {
+    return failure();
+  }
+  SmallVector<int64_t> iterationSizes = std::move(maybeIterationSizes.value());
+
+  Location loc = linalgOp.getLoc();
+  SmallVector<AffineMap> maps = linalgOp.getIndexingMapsArray();
+  auto opType = IREE::Encoding::EncodingOpType::Conv;
+  auto encoding = EncodingAttr::get(ctx, operandIndex, opType, elemTypes, maps,
+                                    iterationSizes);
+
+  auto encodedLhs = setEncoding(lhs, IREE::Encoding::CONV_LHS);
+  auto encodedRhs = setEncoding(rhs, IREE::Encoding::CONV_RHS);
+  auto encodedOut = setEncoding(out, IREE::Encoding::CONV_OUT);
+  Value opTiled = clone(rewriter, linalgOp, encodedOut.getType(),
+                        ValueRange{encodedLhs, encodedRhs, encodedOut})
+                      ->getResult(0);
+
+  return success();
 }
 
 static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
@@ -130,6 +196,7 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
                                    iterationSizes);
       break;
     }
+    /*add a case for convolution*/
     case EncodingOptions::MatmulK: {
       SmallVector<int32_t> kDims;
       AffineMap indexingMap = maps[operandIndex];
@@ -445,6 +512,7 @@ struct SetEncodingPass final : impl::SetEncodingPassBase<SetEncodingPass> {
 
     switch (encodingOption) {
     case EncodingOptions::Generic:
+    /*convolution encoding option*/
     case EncodingOptions::MatmulK: {
       SmallVector<linalg::LinalgOp> candidates =
           getDataTilingCandidates(funcOp);
@@ -455,6 +523,17 @@ struct SetEncodingPass final : impl::SetEncodingPassBase<SetEncodingPass> {
           return signalPassFailure();
         }
       }
+    case EncodingOptions::Conv: {
+      SmallVector<linalg::LinalgOp> candidates =
+          getDataTilingCandidates(funcOp);
+      for (linalg::LinalgOp linalgOp : candidates) {
+        IREE::Encoding::removeDataTilingHint(linalgOp);
+        if (failed(
+                setConvDataTilingEncodings(rewriter, linalgOp, encodingOption))) {
+          return signalPassFailure();
+        }
+      }
+    }
       linalg::FillOp::getCanonicalizationPatterns(postPatterns, context);
       postPatterns.add<FoldFillWithSetEncoding>(context);
       break;

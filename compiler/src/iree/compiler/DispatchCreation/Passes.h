@@ -18,7 +18,7 @@
 
 namespace mlir::iree_compiler::DispatchCreation {
 
-enum class EncodingOptions { Padding, MatmulK, Generic };
+enum class EncodingOptions { Padding, MatmulK, Generic, Conv };
 
 //===----------------------------------------------------------------------===//
 // Pipelines
