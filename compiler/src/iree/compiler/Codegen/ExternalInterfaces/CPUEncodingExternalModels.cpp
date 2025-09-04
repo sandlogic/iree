@@ -59,6 +59,7 @@ namespace mlir::iree_compiler::IREE::CPU {
 
 using IREE::Codegen::MaterializeEncodingInfo;
 using IREE::Codegen::TileMxNxK;
+using IREE::Codegen::TileNxHxWxC;
 
 namespace {
 
@@ -288,7 +289,16 @@ TileMxNxK chooseMatmulTile(ArrayRef<TileMxNxK> enumeratedTiles,
   return bestRatedTile;
 }
 
-Operation *lowerContractionOpWithEncoding(
+TileNxHxWxC chooseConvTile(const SmallVector<TileNxHxWxC> &tiles) {
+  // Choose the best tile for the convolution operation.
+  for (const auto &tile : tiles) {
+    return tile;
+  }
+  // If no tile matches the dimensions, return the first tile.
+  return tiles.front();
+}
+
+FailureOr<Operation *> lowerContractionOpWithEncoding(
     OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
     IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
   if (!linalgOp.hasPureTensorSemantics()) {
@@ -684,6 +694,13 @@ enumerateCPUMatmulTiles(IREE::Encoding::EncodingAttr encoding,
   return {};
 }
 
+static SmallVector<TileNxHxWxC>
+enumerateExsleratev2ConvTiles(IREE::Encoding::EncodingAttr encoding,
+                              DictionaryAttr config) {
+  // Fallback - no architecture-optimized tile size for this case.
+  return {};
+}
+
 struct CPUEncodingPackedLayoutMaterializerAttr
     : public PackedLayoutMaterializerAttrExternalModelBase<
           CPUEncodingPackedLayoutMaterializerAttr, CPUEncodingResolverAttr> {
@@ -1009,41 +1026,26 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
       return info;
     }
 
-    // We only know about contractions with {Batch, M, N, K} <= 1 at the moment.
-    auto cDims = getEncodingContractionDims(encoding);
-    if (failed(cDims) || cDims->batch.size() > 1 || cDims->m.size() > 1 ||
-        cDims->n.size() > 1 || cDims->k.size() > 1) {
+    SmallVector<TileNxHxWxC> enumeratedTileNxHxWxC =
+        enumerateExsleratev2ConvTiles(encoding, layoutAttr.getConfiguration());
+    if (enumeratedTileNxHxWxC.empty()) {
       return info;
     }
 
-    SmallVector<TileMxNxK> enumeratedTileMxNxK =
-        enumerateCPUMatmulTiles(encoding, layoutAttr.getConfiguration());
-    if (enumeratedTileMxNxK.empty()) {
-      return info;
-    }
-    auto narrowDim = IREE::Encoding::getPo2MatmulNarrowDim(encoding);
-    TileMxNxK chosenTileMxNxK =
-        chooseMatmulTile(enumeratedTileMxNxK, narrowDim);
+    TileNxHxWxC chosenTileNxHxWxC = chooseConvTile(enumeratedTileNxHxWxC);
     FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
-        getEncodingInfoForMatmul(encoding, chosenTileMxNxK);
+        getEncodingInfoForConv(encoding, chosenTileNxHxWxC);
     if (failed(maybeEncodingInfo)) {
       return info;
     }
     info = std::move(maybeEncodingInfo.value());
-    if (IREE::Encoding::isNarrowNResult(encoding)) {
-      transposeInPlace(info);
-    }
-    FailureOr<IREE::Codegen::ScalableTileFlags> scalableFlags =
-        getScalableTileFlags(*cDims, encoding, layoutAttr.getConfiguration());
-    if (succeeded(scalableFlags)) {
-      info.scalableTiles = std::move(scalableFlags);
-    }
+
     return info;
   }
 };
 
 struct Exsleratev2EncodingResolverMaterializerAttr final
-    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+    : EncodingLayoutMaterializerAttrExternalModelBase<
           Exsleratev2EncodingResolverMaterializerAttr,
           Exsleratev2EncodingResolverAttr> {
 

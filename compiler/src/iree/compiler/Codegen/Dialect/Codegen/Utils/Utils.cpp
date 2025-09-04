@@ -444,4 +444,18 @@ getEncodingInfoForMatmul(Encoding::EncodingAttr encoding,
   return encodingInfo;
 }
 
+FailureOr<MaterializeEncodingInfo>
+getEncodingInfoForConv(Encoding::EncodingAttr encoding,
+                       TileNxHxWxC tileNxHxWxC) {
+  MaterializeEncodingInfo encodingInfo;
+  // FailureOr<linalg::ConvolutionDimensions> convDims =
+  //     Encoding::getEncodingConvDims(encoding);
+
+  // if (failed(convDims)) {
+  //   return failure();
+  // }
+
+  return encodingInfo;
+}
+
 } // namespace mlir::iree_compiler::IREE::Codegen
