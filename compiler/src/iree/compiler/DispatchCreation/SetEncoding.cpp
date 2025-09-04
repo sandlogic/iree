@@ -137,17 +137,17 @@ setConvDataTilingEncodings(RewriterBase &rewriter, linalg::LinalgOp linalgOp,
   SmallVector<int64_t> iterationSizes = std::move(maybeIterationSizes.value());
 
   Location loc = linalgOp.getLoc();
+  MLIRContext *ctx = linalgOp.getContext();
   SmallVector<AffineMap> maps = linalgOp.getIndexingMapsArray();
-  auto opType = IREE::Encoding::EncodingOpType::Conv;
-  auto encoding = EncodingAttr::get(ctx, operandIndex, opType, elemTypes, maps,
-                                    iterationSizes);
-
-  auto encodedLhs = setEncoding(lhs, IREE::Encoding::CONV_LHS);
-  auto encodedRhs = setEncoding(rhs, IREE::Encoding::CONV_RHS);
-  auto encodedOut = setEncoding(out, IREE::Encoding::CONV_OUT);
-  Value opTiled = clone(rewriter, linalgOp, encodedOut.getType(),
-                        ValueRange{encodedLhs, encodedRhs, encodedOut})
-                      ->getResult(0);
+  auto opType = IREE::Encoding::EncodingOpType::conv;
+  auto setConvEncodingWrapper = [&](Value src, int64_t operandIndex) -> Value {
+    auto encoding = EncodingAttr::get(ctx, operandIndex, opType, elemTypes,
+                                      maps, iterationSizes);
+    return setEncoding(rewriter, loc, src, encoding);
+  };
+  setConvEncodingWrapper(lhs, IREE::Encoding::CONV_LHS);
+  setConvEncodingWrapper(rhs, IREE::Encoding::CONV_RHS);
+  setConvEncodingWrapper(out, IREE::Encoding::CONV_RESULT);
 
   return success();
 }
@@ -523,19 +523,21 @@ struct SetEncodingPass final : impl::SetEncodingPassBase<SetEncodingPass> {
           return signalPassFailure();
         }
       }
+
+      linalg::FillOp::getCanonicalizationPatterns(postPatterns, context);
+      postPatterns.add<FoldFillWithSetEncoding>(context);
+      break;
+    }
     case EncodingOptions::Conv: {
       SmallVector<linalg::LinalgOp> candidates =
           getDataTilingCandidates(funcOp);
       for (linalg::LinalgOp linalgOp : candidates) {
         IREE::Encoding::removeDataTilingHint(linalgOp);
-        if (failed(
-                setConvDataTilingEncodings(rewriter, linalgOp, encodingOption))) {
+        if (failed(setConvDataTilingEncodings(rewriter, linalgOp,
+                                              encodingOption))) {
           return signalPassFailure();
         }
       }
-    }
-      linalg::FillOp::getCanonicalizationPatterns(postPatterns, context);
-      postPatterns.add<FoldFillWithSetEncoding>(context);
       break;
     }
     case EncodingOptions::Padding: {

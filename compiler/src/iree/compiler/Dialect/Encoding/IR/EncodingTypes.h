@@ -26,6 +26,11 @@ const int64_t MATMUL_LHS = 0;
 const int64_t MATMUL_RHS = 1;
 const int64_t MATMUL_RESULT = 2;
 
+// Assign a name to conv operand indices for clarity
+const int64_t CONV_LHS = 0;
+const int64_t CONV_RHS = 1;
+const int64_t CONV_RESULT = 2;
+
 /// Convert operand index to strings for printing
 std::string stringifyOperandIndex(IntegerAttr);
 
