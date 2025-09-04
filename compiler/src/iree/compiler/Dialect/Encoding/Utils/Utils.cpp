@@ -39,6 +39,19 @@ getEncodingContractionDims(EncodingAttr encoding) {
   return linalg::inferContractionDims(indexingMaps);
 }
 
+// FailureOr<linalg::ConvolutionDimensions>
+// getEncodingConvDims(EncodingAttr encoding) {
+//   ArrayAttr indexingMapsAttr = encoding.getUserIndexingMaps();
+//   if (!indexingMapsAttr) {
+//     return failure();
+//   }
+//   // Derive the convolution dims from the first maps in every entry of the
+//   // `user_indexing_maps` as these contain the layout information about the
+//   // originally encoded operation.
+//   SmallVector<AffineMap> indexingMaps = encoding.getRootMaps();
+//   return linalg::inferConvolutionDims(indexingMaps);
+// }
+
 MatmulNarrowDim getPo2MatmulNarrowDim(EncodingAttr encoding) {
   if (encoding.getOpType().getValue() != EncodingOpType::matmul) {
     return {};
