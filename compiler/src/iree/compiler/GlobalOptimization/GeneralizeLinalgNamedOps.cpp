@@ -53,8 +53,7 @@ void GeneralizeLinalgNamedOpsPass::runOnOperation() {
                         linalg::LogOp, linalg::MapOp, linalg::MaxOp,
                         linalg::MulOp, linalg::NegFOp, linalg::ReduceOp,
                         linalg::SubOp, linalg::TransposeOp>(
-            linalgOp.getOperation()) ||
-        linalg::isaConvolutionOpInterface(linalgOp)) {
+            linalgOp.getOperation())) {
       namedOpCandidates.push_back(linalgOp);
     }
   });
