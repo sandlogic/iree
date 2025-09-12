@@ -28,6 +28,7 @@ iree_cc_library(
     MLIRLinalgUtils
     iree::compiler::Dialect::Encoding::IR
     iree::compiler::Dialect::Util::IR
+    iree::compiler::Dialect::LinalgExt::Utils
   PUBLIC
 )
 

@@ -125,6 +125,24 @@ static bool dataTilablePreCondition(linalg::LinalgOp linalgOp) {
 ///
 /// TODO(#16176): Loosen restrictions on contraction ops once data tiling
 /// can support more cases.
+
+static bool isSupportedConvolutionOp(linalg::LinalgOp linalgOp) {
+  if (!dataTilablePreCondition(linalgOp)) {
+    return false;
+  }
+  if (!linalg::isaConvolutionOpInterface(linalgOp)) {
+    return false;
+  }
+  auto convDims = linalg::inferConvolutionDims(linalgOp);
+  if (failed(convDims)) {
+    return false;
+  }
+  if (convDims->outputImage.empty() || convDims->filterLoop.empty()) {
+    return false;
+  }
+  return true;
+}
+
 static bool isSupportedContractionOp(linalg::LinalgOp linalgOp) {
   if (!dataTilablePreCondition(linalgOp)) {
     return false;
@@ -186,7 +204,8 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
     }
     auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
     if (linalgOp && (isSupportedContractionOp(linalgOp) ||
-                     isSupportedScaledContractionOp(linalgOp))) {
+                     isSupportedScaledContractionOp(linalgOp) ||
+                     isSupportedConvolutionOp(linalgOp))) {
       candidates.push_back(op);
       return WalkResult::advance();
     }

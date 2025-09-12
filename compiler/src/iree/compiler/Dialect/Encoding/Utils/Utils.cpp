@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
 
+#include "iree/compiler/Dialect/LinalgExt/Utils/MatchUtils.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/IR/AffineMap.h"
@@ -39,18 +40,18 @@ getEncodingContractionDims(EncodingAttr encoding) {
   return linalg::inferContractionDims(indexingMaps);
 }
 
-// FailureOr<linalg::ConvolutionDimensions>
-// getEncodingConvDims(EncodingAttr encoding) {
-//   ArrayAttr indexingMapsAttr = encoding.getUserIndexingMaps();
-//   if (!indexingMapsAttr) {
-//     return failure();
-//   }
-//   // Derive the convolution dims from the first maps in every entry of the
-//   // `user_indexing_maps` as these contain the layout information about the
-//   // originally encoded operation.
-//   SmallVector<AffineMap> indexingMaps = encoding.getRootMaps();
-//   return linalg::inferConvolutionDims(indexingMaps);
-// }
+FailureOr<linalg::ConvolutionDimensions>
+getEncodingConvDims(EncodingAttr encoding) {
+  ArrayAttr indexingMapsAttr = encoding.getUserIndexingMaps();
+  if (!indexingMapsAttr) {
+    return failure();
+  }
+  // Derive the convolution dims from the first maps in every entry of the
+  // `user_indexing_maps` as these contain the layout information about the
+  // originally encoded operation.
+  SmallVector<AffineMap> indexingMaps = encoding.getRootMaps();
+  return IREE::LinalgExt::inferConvolutionDims(indexingMaps);
+}
 
 MatmulNarrowDim getPo2MatmulNarrowDim(EncodingAttr encoding) {
   if (encoding.getOpType().getValue() != EncodingOpType::matmul) {

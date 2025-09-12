@@ -349,12 +349,68 @@ FailureOr<MaterializeEncodingInfo>
 getEncodingInfoForConv(Encoding::EncodingAttr encoding,
                        TileNxHxWxC tileNxHxWxC) {
   MaterializeEncodingInfo encodingInfo;
-  // FailureOr<linalg::ConvolutionDimensions> convDims =
-  //     Encoding::getEncodingConvDims(encoding);
+  FailureOr<linalg::ConvolutionDimensions> convDims =
+      Encoding::getEncodingConvDims(encoding);
 
-  // if (failed(convDims)) {
-  //   return failure();
-  // }
+  if (failed(convDims)) {
+    return failure();
+  }
+
+  assert(convDims->outputImage.size() <= 1 &&
+         convDims->outputChannel.size() <= 1 &&
+         convDims->filterLoop.size() == 1 && convDims->batch.size() <= 1 &&
+         convDims->inputChannel.size() <= 1 &&
+         "Expected at most one outputImage, filterLoop, inputChannel, "
+         "outputChannel and Batch dimension");
+
+  std::optional<unsigned> batchDim =
+      convDims->batch.empty()
+          ? std::nullopt
+          : encoding.mapDimToOperandIndex(convDims->batch[0]);
+
+  std::optional<unsigned> ocDim =
+      convDims->outputChannel.empty()
+          ? std::nullopt
+          : encoding.mapDimToOperandIndex(convDims->outputChannel[0]);
+
+  std::optional<unsigned> kHDim =
+      convDims->filterLoop.size() < 1
+          ? std::nullopt
+          : encoding.mapDimToOperandIndex(convDims->filterLoop[0]);
+
+  std::optional<unsigned> kWDim =
+      convDims->filterLoop.size() < 2
+          ? std::nullopt
+          : encoding.mapDimToOperandIndex(convDims->filterLoop[1]);
+
+  std::optional<unsigned> icDim =
+      convDims->inputChannel.empty()
+          ? std::nullopt
+          : encoding.mapDimToOperandIndex(convDims->inputChannel[0]);
+
+  if (batchDim.has_value()) {
+    encodingInfo.outerDimsPerm.push_back(batchDim.value());
+  }
+  if (ocDim.has_value()) {
+    // encodingInfo.outerDimsPerm.push_back(ocDim.value());
+    encodingInfo.innerDimsPos.push_back(ocDim.value());
+    encodingInfo.innerTileSizes.push_back(tileNxHxWxC.N);
+  }
+  if (kHDim.has_value()) {
+    // encodingInfo.outerDimsPerm.push_back(kHDim.value());
+    // encodingInfo.innerDimsPos.push_back(kHDim.value());
+    // encodingInfo.innerTileSizes.push_back(tileNxHxWxC.H);
+  }
+  if (kWDim.has_value()) {
+    // encodingInfo.outerDimsPerm.push_back(kWDim.value());
+    // encodingInfo.innerDimsPos.push_back(kWDim.value());
+    // encodingInfo.innerTileSizes.push_back(tileNxHxWxC.W);
+  }
+  if (icDim.has_value()) {
+    // encodingInfo.outerDimsPerm.push_back(icDim.value());
+    encodingInfo.innerDimsPos.push_back(icDim.value());
+    encodingInfo.innerTileSizes.push_back(tileNxHxWxC.C);
+  }
 
   return encodingInfo;
 }

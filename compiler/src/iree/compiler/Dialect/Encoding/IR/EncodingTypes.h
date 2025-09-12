@@ -32,6 +32,10 @@ const int64_t SCALED_MATMUL_LHS_SCALES = 2;
 const int64_t SCALED_MATMUL_RHS_SCALES = 3;
 const int64_t SCALED_MATMUL_RESULT = 4;
 
+const int64_t CONV_LHS = 0;
+const int64_t CONV_RHS = 1;
+const int64_t CONV_RESULT = 2;
+
 /// Convert operand index to strings for printing
 std::string stringifyOperandIndex(IntegerAttr);
 
