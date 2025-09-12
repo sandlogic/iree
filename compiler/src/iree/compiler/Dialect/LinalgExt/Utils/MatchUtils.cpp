@@ -16,6 +16,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/AffineExprVisitor.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/MLIRContext.h"
@@ -43,6 +45,119 @@ enum class MatchContractionResult {
   NotAddMul
 };
 }
+
+template <typename T>
+static T getAffineExprOfType(AffineExpr lhs, AffineExpr rhs) {
+  return isa<T>(lhs) ? cast<T>(lhs) : (isa<T>(rhs) ? cast<T>(rhs) : nullptr);
+}
+
+namespace {
+/// Walk the indexing expressions for input of a convolution operation to verify
+/// its of the right form, either
+/// - AffineDimExpr
+/// - AffineDimExpr (`*` (AffineSymbolExpr | AffineConstantExpr))?
+///      (`+` AffineDimExpr (`*` (AffineSymbolExpr | AffineConstantExpr))?)*
+///
+/// classifies the AffineDimExpr as convolved dimensions or unconvolved
+/// dimensions and verifies each dimension occurs only once.
+struct ConvAccessExprWalker
+    : public AffineExprVisitor<ConvAccessExprWalker, LogicalResult> {
+  // Stores dimensions used in expressions of the above form.
+  llvm::SmallDenseSet<int64_t> convolvedDims;
+  // Stores the dual mapping between LHS and RHS of convolution exprs.
+  llvm::SmallDenseMap<int64_t, int64_t> convolvedDimMapping;
+  // Stores single use dimensions used by an AffineDimExpr.
+  llvm::SmallDenseSet<int64_t> unConvolvedDims;
+  // Stores a mapping from convolved dims to their coefficient.
+  llvm::SmallDenseMap<int64_t, AffineExpr> strideAndDilationMapping;
+
+  // Removes dims with multiple uses in the source input map from dimension
+  // sets tracked by this walker.
+  void clearMultiUseDims(AffineMap map) {
+    for (int dimPos = 0, e = map.getNumDims(); dimPos < e; ++dimPos) {
+      if (llvm::count_if(map.getResults(), [dimPos](AffineExpr e) {
+            return e.isFunctionOfDim(dimPos);
+          }) > 1) {
+        convolvedDims.erase(dimPos);
+        unConvolvedDims.erase(dimPos);
+        // If a duplicate dim is marked as convolved, the pair of the duplicate
+        // dim must be removed from the map as well.
+        auto it = convolvedDimMapping.find(dimPos);
+        if (it != convolvedDimMapping.end()) {
+          int64_t pairedDim = it->second;
+          convolvedDims.erase(pairedDim);
+          unConvolvedDims.erase(pairedDim);
+          strideAndDilationMapping.erase(pairedDim);
+          convolvedDimMapping.erase(dimPos);
+          convolvedDimMapping.erase(pairedDim);
+        }
+      }
+    }
+  }
+
+  LogicalResult visitDimExpr(AffineDimExpr dimExpr) {
+    unsigned position = dimExpr.getPosition();
+    if (unConvolvedDims.count(position) || convolvedDims.count(position)) {
+      return failure();
+    }
+    unConvolvedDims.insert(position);
+    return success();
+  }
+
+  LogicalResult visitSymbolExpr(AffineSymbolExpr expr) { return failure(); }
+
+  LogicalResult visitConstantExpr(AffineConstantExpr expr) { return failure(); }
+
+  LogicalResult visitAffineBinaryOpExpr(AffineBinaryOpExpr binaryExpr) {
+    // In pre-order visit, top level op has to be an add op.
+    if (binaryExpr.getKind() != AffineExprKind::Add)
+      return failure();
+    auto lhsDimPos = getDimExprOrMulExprDimPos(binaryExpr.getLHS());
+    auto rhsDimPos = getDimExprOrMulExprDimPos(binaryExpr.getRHS());
+    if (failed(lhsDimPos) || failed(rhsDimPos))
+      return failure();
+    convolvedDimMapping[*lhsDimPos] = *rhsDimPos;
+    convolvedDimMapping[*rhsDimPos] = *lhsDimPos;
+    return success();
+  }
+
+  FailureOr<int64_t> getDimExprOrMulExprDimPos(AffineExpr expr) {
+    if (auto dimExpr = dyn_cast<AffineDimExpr>(expr)) {
+      int64_t dim = dimExpr.getPosition();
+      if (convolvedDims.count(dim) || unConvolvedDims.count(dim))
+        return failure();
+      // Stride/dilation for this dim is implicitly 1.
+      strideAndDilationMapping[dim] =
+          getAffineConstantExpr(1, expr.getContext());
+      convolvedDims.insert(dim);
+      return dim;
+    }
+    if (auto symbolMulExpr = dyn_cast<AffineBinaryOpExpr>(expr)) {
+      if (symbolMulExpr.getKind() != AffineExprKind::Mul)
+        return failure();
+      auto lhsExpr = symbolMulExpr.getLHS();
+      auto rhsExpr = symbolMulExpr.getRHS();
+      // Check for symbol expression.
+      AffineExpr mulExpr =
+          getAffineExprOfType<AffineSymbolExpr>(lhsExpr, rhsExpr);
+      // If there was no symbol expr, check for constant expression.
+      if (!mulExpr) {
+        mulExpr = getAffineExprOfType<AffineConstantExpr>(lhsExpr, rhsExpr);
+      }
+      auto dimExpr = getAffineExprOfType<AffineDimExpr>(lhsExpr, rhsExpr);
+      if (!mulExpr || !dimExpr)
+        return failure();
+      int64_t dim = dimExpr.getPosition();
+      if (convolvedDims.count(dim) || unConvolvedDims.count(dim))
+        return failure();
+      strideAndDilationMapping[dim] = mulExpr;
+      convolvedDims.insert(dim);
+      return dim;
+    }
+    return failure();
+  }
+};
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // ScaledContractionOpInterface implementation
@@ -310,6 +425,90 @@ bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp) {
   }
   Operation *op = linalgOp.getOperation();
   return isScaledContractionImpl(op) == detail::MatchContractionResult::Success;
+}
+
+FailureOr<linalg::ConvolutionDimensions> inferConvolutionDimsImpl(
+    ArrayRef<AffineMap> indexingMaps, ArrayRef<utils::IteratorType> iterators,
+    ConvAccessExprWalker &inputExprWalker, bool allowEmptyConvolvedDims) {
+  if (indexingMaps.size() < 3) {
+    return failure();
+  }
+  llvm::SmallDenseSet<int64_t> filterDims =
+      findPermutationsIndexingOperand(indexingMaps[1], iterators, par);
+  llvm::SmallDenseSet<int64_t> outputDims =
+      findPermutationsIndexingOperand(indexingMaps[2], iterators, par);
+
+  // unConvolvedDims & outputDims - filterDims are the batch iterators.
+  llvm::SmallDenseSet<int64_t> batch = inputExprWalker.unConvolvedDims;
+  llvm::set_intersect(batch, outputDims);
+  llvm::set_subtract(batch, filterDims);
+
+  // convolvedDims & outputDims are the output image iterators.
+  llvm::SmallDenseSet<int64_t> oi = inputExprWalker.convolvedDims;
+  llvm::set_intersect(oi, outputDims);
+
+  // filterDims & outputDims - unConvolvedDims are the output channel iterators.
+  llvm::SmallDenseSet<int64_t> oc = filterDims;
+  llvm::set_intersect(oc, outputDims);
+  llvm::set_subtract(oc, inputExprWalker.unConvolvedDims);
+
+  // filterDims & outputDims & unConvolvedDims are the depth iterators.
+  llvm::SmallDenseSet<int64_t> depth = filterDims;
+  llvm::set_intersect(depth, outputDims);
+  llvm::set_intersect(depth, inputExprWalker.unConvolvedDims);
+
+  llvm::SmallDenseSet<int64_t> filterReducedDims =
+      findPermutationsIndexingOperand(indexingMaps[1], iterators, red);
+
+  // convolvedDims & filterReducedDims are the filter loop iterators.
+  llvm::SmallDenseSet<int64_t> fl = inputExprWalker.convolvedDims;
+  llvm::set_intersect(fl, filterReducedDims);
+
+  // unConvolvedDims & filterReducedDims are the input channel iterators.
+  llvm::SmallDenseSet<int64_t> ic = inputExprWalker.unConvolvedDims;
+  llvm::set_intersect(ic, filterReducedDims);
+
+  if (oi.empty() && !allowEmptyConvolvedDims)
+    return failure();
+
+  // Return each set in sorted order.
+  linalg::ConvolutionDimensions dimensions{
+      SmallVector<unsigned, 2>(batch.begin(), batch.end()),
+      SmallVector<unsigned, 2>(oi.begin(), oi.end()),
+      SmallVector<unsigned, 2>(oc.begin(), oc.end()),
+      SmallVector<unsigned, 2>(fl.begin(), fl.end()),
+      SmallVector<unsigned, 2>(ic.begin(), ic.end()),
+      SmallVector<unsigned, 2>(depth.begin(), depth.end()),
+      /*strides=*/SmallVector<int64_t, 2>{},
+      /*dilations=*/SmallVector<int64_t, 2>{}};
+  llvm::sort(dimensions.batch);
+  llvm::sort(dimensions.outputImage);
+  llvm::sort(dimensions.outputChannel);
+  llvm::sort(dimensions.filterLoop);
+  llvm::sort(dimensions.inputChannel);
+  llvm::sort(dimensions.depth);
+
+  return dimensions;
+}
+
+FailureOr<linalg::ConvolutionDimensions>
+inferConvolutionDims(ArrayRef<AffineMap> indexingMaps) {
+  if (indexingMaps.size() < 3) {
+    return failure();
+  }
+  auto iterators = inferIteratorsFromOutMap(indexingMaps[2]);
+  if (failed(iterators)) {
+    return failure();
+  }
+
+  ConvAccessExprWalker inputExprWalker;
+  for (AffineExpr expr : indexingMaps[0].getResults())
+    (void)inputExprWalker.visit(expr);
+  inputExprWalker.clearMultiUseDims(indexingMaps[0]);
+
+  return inferConvolutionDimsImpl(indexingMaps, iterators.value(),
+                                  inputExprWalker,
+                                  /*allowEmptyConvolvedDims=*/false);
 }
 
 }; // namespace mlir::iree_compiler::IREE::LinalgExt
