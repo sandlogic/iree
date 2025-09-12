@@ -645,15 +645,56 @@ struct UnsetEncodingOpLoweringConversion
 class MaterializeLinalgOp
     : public OpInterfaceConversionPattern<linalg::LinalgOp> {
 public:
-  MaterializeLinalgOp(const MaterializeEncodingTypeConverter &typeConverter,
-                      MLIRContext *context, PatternBenefit benefit = 1)
+  MaterializeContractionOp(
+      const MaterializeEncodingTypeConverter &typeConverter,
+      MLIRContext *context, PatternBenefit benefit = 1)
       : OpInterfaceConversionPattern<linalg::LinalgOp>(typeConverter, context,
                                                        benefit) {}
 
   LogicalResult
   matchAndRewrite(linalg::LinalgOp op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    auto converter = getTypeConverter<MaterializeEncodingTypeConverter>();
+    if (!linalg::isaContractionOpInterface(op)) {
+      return rewriter.notifyMatchFailure(
+          op, "does not implement ContractionOpInterface");
+    }
+
+    auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
+        this->getTypeConverter());
+
+    IREE::Encoding::LayoutMaterializerAttr layoutAttr =
+        converter->getLayoutAttr();
+    SmallVector<Type> convertedResTypes;
+    for (auto init : op.getDpsInits()) {
+      convertedResTypes.push_back(converter->convertType(init.getType()));
+    }
+    Operation *newOp =
+        layoutAttr.lowerOp(rewriter, op, convertedResTypes, operands);
+    rewriter.replaceOp(op, newOp->getResults());
+    return success();
+  }
+};
+
+class MaterializeConvolutionOp
+    : public OpInterfaceConversionPattern<linalg::LinalgOp> {
+public:
+  MaterializeConvolutionOp(
+      const MaterializeEncodingTypeConverter &typeConverter,
+      MLIRContext *context, PatternBenefit benefit = 1)
+      : OpInterfaceConversionPattern<linalg::LinalgOp>(typeConverter, context,
+                                                       benefit) {}
+
+  LogicalResult
+  matchAndRewrite(linalg::LinalgOp op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!linalg::isaConvolutionOpInterface(op)) {
+      return rewriter.notifyMatchFailure(
+          op, "does not implement ConvolutionOpInterface");
+    }
+
+    auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
+        this->getTypeConverter());
+
     IREE::Encoding::LayoutMaterializerAttr layoutAttr =
         converter->getLayoutAttr();
     SmallVector<Type> convertedResTypes;
@@ -736,13 +777,15 @@ void populateMaterializeEncodingPatterns(
                          isRankedTensorTypeWithEncoding);
   });
 
-  patterns.insert<MaterializeLinalgOp, SetEncodingOpLoweringConversion,
-                  UnsetEncodingOpLoweringConversion,
-                  MaterializeOperation<tensor::EmptyOp>,
-                  MaterializeOptimizationBarrierOp,
-                  MaterializeTensorExtDispatchTensorLoadOp,
-                  MaterializeTensorExtDispatchTensorStoreOp,
-                  MaterializeInterfaceBindingEncoding, MaterializeFuncReturnOp>(
+  patterns.insert<
+      MaterializeContractionOp, MaterializeConvolutionOp,
+      SetEncodingOpLoweringConversion, UnsetEncodingOpLoweringConversion,
+      MaterializeDPSOperation<linalg::FillOp>,
+      MaterializeDPSOperation<linalg::GenericOp>,
+      MaterializeOperation<tensor::EmptyOp>, MaterializeOptimizationBarrierOp,
+      MaterializeTensorExtDispatchTensorLoadOp,
+      MaterializeTensorExtDispatchTensorStoreOp,
+      MaterializeInterfaceBindingEncoding, MaterializeFuncReturnOp>(
       typeConverter, context);
 };
 

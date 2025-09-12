@@ -55,8 +55,48 @@ static Value unsetEncoding(OpBuilder &builder, Location loc, Value source,
   auto unsetEncodingReturnType =
       RankedTensorType::get(sourceType.getShape(), sourceType.getElementType());
   return IREE::Encoding::UnsetEncodingOp::create(
-      builder, loc, unsetEncodingReturnType, source, dynamicSizesVec,
-      encodingDims);
+      builder, loc, unsetEncodingReturnType, source, dynamicSizesVec);
+}
+
+/// Given a LinalgOp and one of its OpOperands, return the element type,
+/// inferring unsignedness from the body of the LinalgOp
+static Type getConvolutionInputTypeWithSignedness(OpBuilder &builder,
+                                                  linalg::LinalgOp linalgOp,
+                                                  OpOperand *operand) {
+  assert(linalg::isaConvolutionOpInterface(linalgOp));
+  assert(operand->getOwner() == linalgOp.getOperation());
+  auto elemType = getElementTypeOrSelf(operand->get().getType());
+  Value blockArg = linalgOp.getMatchingBlockArgument(operand);
+  for (auto bodyOp : blockArg.getParentBlock()->getOps<arith::ExtUIOp>()) {
+    if (bodyOp->getOperand(0) == blockArg) {
+      return builder.getIntegerType(elemType.getIntOrFloatBitWidth(),
+                                    /*isSigned=*/false);
+    }
+  }
+  for (auto bodyOp : blockArg.getParentBlock()->getOps<arith::ExtSIOp>()) {
+    if (bodyOp->getOperand(0) == blockArg) {
+      return builder.getIntegerType(elemType.getIntOrFloatBitWidth(),
+                                    /*isSigned=*/true);
+    }
+  }
+  return elemType;
+}
+
+static Type getContractionInputTypeWithSignedness(OpBuilder &builder,
+                                                  linalg::LinalgOp linalgOp,
+                                                  OpOperand *operand) {
+  assert(linalg::isaContractionOpInterface(linalgOp));
+  assert(operand->getOwner() == linalgOp.getOperation());
+  auto elemType = getElementTypeOrSelf(operand->get().getType());
+  // Infer if unsigned from body ops
+  Value blockArg = linalgOp.getMatchingBlockArgument(operand);
+  for (auto bodyCastOp : blockArg.getParentBlock()->getOps<arith::ExtUIOp>()) {
+    if (bodyCastOp->getOperand(0) == blockArg) {
+      return builder.getIntegerType(elemType.getIntOrFloatBitWidth(),
+                                    /*isSigned=*/false);
+    }
+  }
+  return elemType;
 }
 
 static SmallVector<linalg::LinalgOp>
@@ -71,9 +111,81 @@ getDataTilingCandidates(FunctionOpInterface funcOp) {
   return result;
 }
 
-/// Set data tiling encodings using the SerializableAttr interface.
-/// This uses SerializableAttr::getEncodingProperties() to derive encodings
-/// for all operands and results based on the operation type.
+/// Contains the invariant information across operands for the
+/// iree_encoding.encoding. The operand number is not included because
+/// it is not invariant across operands.
+struct GenericEncodingCommonInfo {
+  IREE::Encoding::EncodingOpType opType;
+  SmallVector<Type> elemTypes;
+  SmallVector<AffineMap> maps;
+  SmallVector<int64_t> iterationSizes;
+};
+
+/// Get the `GenericEncodingCommonInfo` for the `linalgOp` or return failure
+/// if op is not supported. Supported ops are contraction ops and scaled
+/// contraction ops.
+static FailureOr<GenericEncodingCommonInfo>
+getGenericEncodingCommonInfo(RewriterBase &rewriter,
+                             linalg::LinalgOp linalgOp) {
+  // Case 1: ContractionOpInterface
+  if (linalg::isaContractionOpInterface(linalgOp)) {
+    Type lhsElemType = getContractionInputTypeWithSignedness(
+        rewriter, linalgOp, linalgOp.getDpsInputOperand(0));
+    Type rhsElemType = getContractionInputTypeWithSignedness(
+        rewriter, linalgOp, linalgOp.getDpsInputOperand(1));
+    Type outElemType = getContractionInputTypeWithSignedness(
+        rewriter, linalgOp, linalgOp.getDpsInitOperand(0));
+    if (!lhsElemType || !rhsElemType || !outElemType) {
+      return failure();
+    }
+    return GenericEncodingCommonInfo(
+        {/*opType=*/IREE::Encoding::EncodingOpType::matmul,
+         /*elemTypes=*/{lhsElemType, rhsElemType, outElemType},
+         /*map=*/linalgOp.getIndexingMapsArray(),
+         /*iterationSizes=*/linalgOp.getStaticLoopRanges()});
+  }
+  if (linalg::isaConvolutionOpInterface(linalgOp)) {
+    Type lhsElemType = getConvolutionInputTypeWithSignedness(
+        rewriter, linalgOp, linalgOp.getDpsInputOperand(0));
+    Type rhsElemType = getConvolutionInputTypeWithSignedness(
+        rewriter, linalgOp, linalgOp.getDpsInputOperand(1));
+    Type outElemType = getConvolutionInputTypeWithSignedness(
+        rewriter, linalgOp, linalgOp.getDpsInitOperand(0));
+    if (!lhsElemType || !rhsElemType || !outElemType) {
+      return failure();
+    }
+    return GenericEncodingCommonInfo(
+        {/*opType=*/IREE::Encoding::EncodingOpType::conv,
+         /*elemTypes=*/{lhsElemType, rhsElemType, outElemType},
+         /*map=*/linalgOp.getIndexingMapsArray(),
+         /*iterationSizes=*/linalgOp.getStaticLoopRanges()});
+  }
+  // Case 2: Scaled ContractionOpInterface
+  if (!IREE::LinalgExt::isaScaledContractionOpInterface(linalgOp)) {
+    return failure();
+  }
+  FailureOr<IREE::LinalgExt::ScaledContractionDimensions> cDims =
+      IREE::LinalgExt::inferScaledContractionDims(
+          linalgOp.getIndexingMapsArray());
+  Type lhsElemType =
+      getElementTypeOrSelf(linalgOp.getDpsInputOperand(0)->get().getType());
+  Type rhsElemType =
+      getElementTypeOrSelf(linalgOp.getDpsInputOperand(1)->get().getType());
+  Type lhsScalesElemType =
+      getElementTypeOrSelf(linalgOp.getDpsInputOperand(2)->get().getType());
+  Type rhsScalesElemType =
+      getElementTypeOrSelf(linalgOp.getDpsInputOperand(3)->get().getType());
+  Type outElemType =
+      getElementTypeOrSelf(linalgOp.getDpsInitOperand(0)->get().getType());
+  return GenericEncodingCommonInfo(
+      {/*opType=*/IREE::Encoding::EncodingOpType::scaled_matmul,
+       /*elemTypes=*/
+       {lhsElemType, rhsElemType, lhsScalesElemType, rhsScalesElemType,
+        outElemType},
+       /*map=*/linalgOp.getIndexingMapsArray(),
+       /*iterationSizes=*/linalgOp.getStaticLoopRanges()});
+}
+
 static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
                                             linalg::LinalgOp linalgOp,
                                             EncodingOptions encodingOption) {
@@ -107,6 +219,33 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
       setEncoding(rewriter, loc, linalgOp.getDpsInits()[0], initProps.encoding,
                   initProps.dynamicValues);
 
+  Value encodedInitOperand;
+  if (linalg::isaContractionOpInterface(linalgOp)) {
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[0], IREE::Encoding::MATMUL_LHS));
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[1], IREE::Encoding::MATMUL_RHS));
+    encodedInitOperand = setEncodingWrapper(linalgOp.getDpsInits()[0],
+                                            IREE::Encoding::MATMUL_RESULT);
+  } else if (linalg::isaConvolutionOpInterface(linalgOp)) {
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[0], IREE::Encoding::CONV_LHS));
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[1], IREE::Encoding::CONV_RHS));
+    encodedInitOperand = setEncodingWrapper(linalgOp.getDpsInits()[0],
+                                             IREE::Encoding::CONV_RESULT);
+  } else {
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[0], IREE::Encoding::SCALED_MATMUL_LHS));
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[1], IREE::Encoding::SCALED_MATMUL_RHS));
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[2], IREE::Encoding::SCALED_MATMUL_LHS_SCALES));
+    encodedInputOperands.push_back(setEncodingWrapper(
+        linalgOp.getDpsInputs()[3], IREE::Encoding::SCALED_MATMUL_RHS_SCALES));
+    encodedInitOperand = setEncodingWrapper(
+        linalgOp.getDpsInits()[0], IREE::Encoding::SCALED_MATMUL_RESULT);
+  }
   SmallVector<Value> encodedOperands(encodedInputOperands);
   encodedOperands.push_back(encodedInitOperand);
   Value opTiled =
