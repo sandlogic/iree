@@ -112,7 +112,8 @@ void buildGlobalOptimizationPassPipeline(
       .addPass(IREE::Flow::createCanonicalizePass)
       .addPass(createRemoveZeroExtentTensorsPass)
       .addPass(createDetachElementwiseFromNamedOpsPass)
-      .addPass(mlir::createSimplifyDepthwiseConvPass);
+      .addPass(mlir::createSimplifyDepthwiseConvPass)
+      .addPass(createGetPaddingValuePass);
   mainPassManager.addPass(createEraseUnusedLinalgOperandsPass());
 
   // Expand tensor shapes into SSA values and optimize the whole program.
