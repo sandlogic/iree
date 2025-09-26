@@ -44,6 +44,15 @@ enum class MatchContractionResult {
   NotProjectedPermutations,
   NotAddMul
 };
+
+enum class MatchEXSLTiledConvolutionResult {
+  Success = 0,
+  NotLinalgOp,
+  WrongNoWeightDims,
+  WrongNumOperands,
+  NotAddMul
+};
+
 }
 
 template <typename T>
@@ -425,6 +434,32 @@ bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp) {
   }
   Operation *op = linalgOp.getOperation();
   return isScaledContractionImpl(op) == detail::MatchContractionResult::Success;
+}
+
+detail::MatchEXSLTiledConvolutionResult
+isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
+  auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+  if (!linalgOp) {
+    return detail::MatchEXSLTiledConvolutionResult::NotLinalgOp;
+  }
+
+  if (linalgOp.getNumDpsInputs() < 2 || linalgOp.getNumDpsInits() != 1)
+    return detail::MatchEXSLTiledConvolutionResult::WrongNumOperands;
+
+  auto indexingMaps = linalgOp.getIndexingMapsArray();
+
+  if (indexingMaps[1].getResults().size() != 6)
+    return detail::MatchEXSLTiledConvolutionResult::WrongNoWeightDims;
+
+  return detail::MatchEXSLTiledConvolutionResult::Success;
+}
+
+bool isaEXSLTileConvolutionOpInterface(linalg::LinalgOp linalgOp) {
+  if (!linalgOp) {
+    return false;
+  }
+  return isEXSLTiledConvolutionInterfaceImpl(linalgOp.getOperation()) ==
+         detail::MatchEXSLTiledConvolutionResult::Success;
 }
 
 FailureOr<linalg::ConvolutionDimensions> inferConvolutionDimsImpl(
