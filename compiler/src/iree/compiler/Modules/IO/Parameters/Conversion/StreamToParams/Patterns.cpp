@@ -29,8 +29,20 @@ struct ParameterLoadOpPattern
   matchAndRewrite(IREE::Stream::ParameterLoadOp loadOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = loadOp.getLoc();
+
+    // Derive the allocation requirements.
+    auto resourceType =
+        cast<IREE::Stream::ResourceType>(loadOp.getResults().front().getType());
+
+    auto resolveOp =
+        rewriter.create<IREE::HAL::AllocatorResolveMemoryPropertiesOp>(
+            loc, rewriter.getI32Type(), rewriter.getI32Type(),
+            IREE::Stream::AffinityAttr::lookupOrDefault(loadOp),
+            static_cast<IREE::HAL::Lifetime>(resourceType.getLifetime()));
+
     auto [device, queueAffinity] =
-        lookupDeviceAndQueueAffinityFor(loadOp, rewriter);
+        lookupDeviceAndQueueAffinityFor(loadOp, resolveOp.getMemoryTypes(),
+                                        resolveOp.getBufferUsage(), rewriter);
 
     // Gather wait/signal fence, which are optional.
     Value waitFence =
@@ -38,24 +50,14 @@ struct ParameterLoadOpPattern
     Value signalFence = getOrCreateSignalFence(
         loc, device, loadOp.getResultTimepoint(), rewriter);
 
-    // Derive the allocation requirements.
-    auto resourceType =
-        cast<IREE::Stream::ResourceType>(loadOp.getResults().front().getType());
-    auto memoryTypes = IREE::HAL::MemoryTypeBitfield::None;
-    auto bufferUsage = IREE::HAL::BufferUsageBitfield::None;
-    if (failed(deriveAllowedResourceBufferBits(loc, resourceType, memoryTypes,
-                                               bufferUsage))) {
-      return failure();
-    }
-
     // Queue operation, which acts like an allocation.
     SmallVector<Type> newResultTypes(loadOp.getResults().size(),
                                      rewriter.getType<IREE::HAL::BufferType>());
     auto newOp = rewriter.create<IREE::IO::Parameters::LoadOp>(
         loc, newResultTypes, device, queueAffinity, waitFence, signalFence,
         adaptor.getSourceScopeAttr(), adaptor.getSourceKeysAttr(),
-        adaptor.getSourceOffsets(), memoryTypes, bufferUsage,
-        adaptor.getResultSizes());
+        adaptor.getSourceOffsets(), resolveOp.getMemoryTypes(),
+        resolveOp.getBufferUsage(), adaptor.getResultSizes());
 
     SmallVector<Value> resultReplacements;
     llvm::append_range(resultReplacements, newOp.getResults());

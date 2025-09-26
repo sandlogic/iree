@@ -30,6 +30,7 @@
 #include "mlir/Conversion/MemRefToSPIRV/MemRefToSPIRVPass.h"
 #include "mlir/Conversion/TosaToArith/TosaToArith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/GPU/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVAttributes.h"
@@ -194,7 +195,6 @@ static void addMemRefLoweringPasses(OpPassManager &modulePassManager) {
       // to handle subview ops.
       .addPass(memref::createFoldMemRefAliasOpsPass)
       .addPass(createEmulateNarrowTypePass)
-      .addPass(memref::createExpandOpsPass)
       .addPass(createCanonicalizerPass)
       .addPass(createCSEPass)
 
@@ -220,7 +220,8 @@ static void addMemRefLoweringPasses(OpPassManager &modulePassManager) {
   modulePassManager.addPass(createFlattenMemRefSubspanPass());
 
   FunctionLikeNest(modulePassManager)
-      .addPass(createSPIRVEraseStorageBufferStaticShapePass);
+      .addPass(createSPIRVEraseStorageBufferStaticShapePass)
+      .addPass(createCSEPass);
 }
 
 /// Adds passes to perform the final SPIR-V conversion.
@@ -402,6 +403,7 @@ void addSPIRVCooperativeMatrixVectorizePassPipeline(
 
   // Tile and distribute to GPU subgroups.
   funcPassManager.addPass(createSPIRVTileToCooperativeOpsPass());
+  funcPassManager.addPass(createPropagateDispatchSizeBoundsPass());
   funcPassManager.addPass(createRemoveSingleIterationLoopPass());
   funcPassManager.addPass(createCanonicalizerPass());
   funcPassManager.addPass(createCSEPass());
@@ -604,8 +606,9 @@ void addSPIRVSubgroupReducePassPipeline(OpPassManager &funcPassManager) {
   funcPassManager.addPass(createCanonicalizerPass());
 
   // Handle vector reduction operations specifically.
-  funcPassManager.addPass(createConvertVectorReductionToGPUPass(
-      /*expandSubgroupReduction=*/false));
+  VectorReductionToGPUPassOptions options;
+  options.expandSubgroupReduction = false;
+  funcPassManager.addPass(createVectorReductionToGPUPass(options));
   // Perform normal vector unrolling and lowering transformations. This breaks
   // vectors down to native machine size.
   addSPIRVVectorLoweringPasses(funcPassManager);
@@ -631,6 +634,7 @@ static void buildSPIRVCodegenConfigurationPassPipelineImpl(
 
 void buildSPIRVCodegenConfigurationPassPipeline(
     OpPassManager &variantPassManager) {
+  variantPassManager.addPass(createSpecializeExportsPass());
   OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();
   buildSPIRVCodegenConfigurationPassPipelineImpl(modulePassManager);
 }
@@ -644,9 +648,11 @@ void buildSPIRVCodegenPassPipeline(OpPassManager &variantPassManager) {
         .addPass(createSPIRVLowerExecutableTargetPass)
         .addPass(createVerifyWorkgroupDistributionPass);
     addMemRefLoweringPasses(modulePassManager);
+    FunctionLikeNest(modulePassManager).addPass(createGpuEliminateBarriers);
   }
   variantPassManager.addPass(createReconcileTranslationInfoPass());
-  variantPassManager.addPass(IREE::Util::createDropCompilerHintsPass());
+  variantPassManager.addPass(IREE::Util::createDropCompilerHintsPass(
+      IREE::Util::DropCompilerHintsPassOptions{/*keepAssumeInt=*/true}));
 
   {
     OpPassManager &modulePassManager = variantPassManager.nest<ModuleOp>();

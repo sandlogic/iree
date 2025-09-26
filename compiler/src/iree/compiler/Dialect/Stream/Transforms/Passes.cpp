@@ -116,18 +116,6 @@ void buildStreamTensorPassPipeline(OpPassManager &passManager,
   // Run inlining after having baked out affinities.
   passManager.addPass(mlir::createInlinerPass());
 
-  // Elide any redundant transfers now that affinities are baked out and we know
-  // where resources are located.
-  //
-  // TODO(benvanik): enable this pass after updating usage refinement: today
-  // the clones are not handled correctly and will result in usage analysis
-  // failing. This seems to be caused by transfers having some non-trivial logic
-  // during analysis that clone does not have and just applying the same logic
-  // to clones results in other errors around lifetime changes. The resource
-  // analysis and refinement logic likely needs a larger reworking.
-  //
-  // passManager.addPass(IREE::Stream::createElideAsyncTransfersPass());
-
   // Cleanup globals that were created during conversion.
   buildStreamCleanupPassPipeline(passManager, transformOptions);
 
@@ -180,6 +168,8 @@ void buildStreamAsyncPassPipeline(OpPassManager &passManager,
   // Everything must now be in stream.async.* form but we don't yet have
   // lifetime assigned.
   passManager.addPass(IREE::Stream::createVerifyLoweringToAsyncResourcesPass());
+
+  passManager.addPass(IREE::Stream::createElideAsyncTransfersPass());
 
   // Materialize copy-on-write behavior with explicit stream.async.* ops.
   // This will insert a lot of copies, so follow it up with a pass that elides
@@ -281,6 +271,14 @@ void buildStreamCmdPassPipeline(OpPassManager &passManager,
   passManager.addPass(IREE::Util::createPropagateSubrangesPass());
   buildStreamCleanupPassPipeline(passManager, transformOptions);
 
+  // Once allocations have been inserted insert the deallocations or referencing
+  // counting ops. Since a bulk of usage has been moved into stream execution
+  // regions at this point there is far less in the program to analyze.
+  passManager.addPass(IREE::Stream::createAutomaticReferenceCountingPass());
+  // TODO(benvanik): run another cleanup after ARC? Today the pass does not
+  // generate much garbage and what it does (mostly around timepoints) will be
+  // handled during the optimization pipeline below.
+
   // Everything must now be in explicit stream.cmd.* form.
   passManager.addPass(IREE::Stream::createVerifyLoweringToCmdPass());
 }
@@ -317,6 +315,11 @@ void buildStreamOptimizationPassPipeline(
 
     // TODO(#9747): elide timepoints that are know-reached due to host
     // synchronization via stream.timepoint.await.
+
+    // Try to reuse transient allocations that would not increase resource
+    // lifetimes.
+    FunctionLikeNest(passManager)
+        .addPass(IREE::Stream::createReuseAllocationsPass);
 
     // Elide timepoints in dependency chains where one is known to have been
     // reached by the time another is (A -> B -> A|C).

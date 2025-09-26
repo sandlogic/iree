@@ -30,9 +30,11 @@ namespace mlir::iree_compiler {
 ///   2. Each vector.insert_strided_slice can map to a
 ///      vector.extract_stirded_slice op.
 /// Returns failure if it can not find the set from vector unrolling artifacts.
+/// NOTE: `insertOps` must be mutable because `.getOffsets()` are non-const.
 static FailureOr<SmallVector<vector::ExtractStridedSliceOp>>
-getUnrolledExtractSlices(BlockArgument srcTensor,
-                         SmallVector<vector::InsertStridedSliceOp> insertOps) {
+getUnrolledExtractSlices(
+    BlockArgument srcTensor,
+    MutableArrayRef<vector::InsertStridedSliceOp> insertOps) {
   SmallVector<vector::ExtractStridedSliceOp> res;
   for (auto user : srcTensor.getUsers()) {
     auto extractStridedSliceOp = dyn_cast<vector::ExtractStridedSliceOp>(user);
@@ -44,7 +46,7 @@ getUnrolledExtractSlices(BlockArgument srcTensor,
     return failure();
 
   std::reverse(res.begin(), res.end());
-  for (const auto [extractOp, insertOp] : llvm::zip_equal(res, insertOps)) {
+  for (auto [extractOp, insertOp] : llvm::zip_equal(res, insertOps)) {
     auto offset0 = insertOp.getOffsets();
     auto offset1 = extractOp.getOffsets();
     if (offset0 != offset1)
@@ -139,8 +141,10 @@ static scf::ForOp hoistVectorExtractInsertSlice(
   // computed iteratively but whose storage has become loop-invariant.
   NewYieldValuesFn yieldFn = [&](OpBuilder &b, Location loc,
                                  ArrayRef<BlockArgument> newBBArgs) {
-    return llvm::map_to_vector(insertOps,
-                               [](auto v) -> Value { return v.getSource(); });
+    return llvm::map_to_vector(
+        insertOps, [](vector::InsertStridedSliceOp sliceOp) -> Value {
+          return sliceOp.getValueToStore();
+        });
   };
   SmallVector<Value> extractResults = llvm::map_to_vector(
       extractOps, [](auto v) -> Value { return v.getResult(); });
@@ -160,7 +164,7 @@ static scf::ForOp hoistVectorExtractInsertSlice(
   for (auto [idx, insertStridedSliceOp] : llvm::enumerate(insertOps)) {
     insertStridedSliceOp->moveAfter(newForOp);
     rewriter.startOpModification(insertStridedSliceOp);
-    insertStridedSliceOp.getSourceMutable().assign(
+    insertStridedSliceOp.getValueToStoreMutable().assign(
         newForOp.getResults()[initArgNumber + idx + 1]);
     insertStridedSliceOp.getDestMutable().assign(
         newForOp.getResults()[initArgNumber]);

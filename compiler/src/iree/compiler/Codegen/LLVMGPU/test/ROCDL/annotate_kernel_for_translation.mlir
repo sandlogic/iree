@@ -2,9 +2,9 @@
 // RUN:   --split-input-file %s | FileCheck %s
 
 #executable_target_rocm_hsaco_fb = #hal.executable.target<"rocm", "rocm-hsaco-fb",
-  {iree.gpu.target = #iree_gpu.target<arch = "gfx942", features = "",
+  {iree_codegen.target_info = #iree_gpu.target<arch = "gfx942", features = "",
                                       wgp = <compute = int32, storage =  b32,
-                                      subgroup =  none, dot =  none, mma = [],
+                                      subgroup =  none,
                                       subgroup_size_choices = [64],
                                       max_workgroup_sizes = [1024, 1024, 1024],
                                       max_thread_count_per_workgroup = 1024,
@@ -16,14 +16,12 @@
 builtin.module {
   hal.executable public @test {
     hal.executable.variant public @rocm_hsaco_fb target(#executable_target_rocm_hsaco_fb) {
-      hal.executable.export public @test ordinal(0) layout(#pipeline_layout)
-        attributes {subgroup_size = 64 : index, workgroup_size = [128 : index, 2 : index, 1 : index]} {
-      ^bb0(%arg0: !hal.device):
+      hal.executable.export public @test ordinal(0) layout(#pipeline_layout) count(%arg0: !hal.device) -> (index, index, index) {
         %c128 = arith.constant 128 : index
         %c2 = arith.constant 2 : index
         %c1 = arith.constant 1 : index
         hal.return %c128, %c2, %c1 : index, index, index
-      }
+      } attributes {subgroup_size = 64 : index, workgroup_size = [128 : index, 2 : index, 1 : index]}
       builtin.module {
         llvm.func @test() {
           llvm.return
@@ -48,9 +46,9 @@ builtin.module {
 // Check that we annotate kernel arguments on gfx942-series.
 
 #executable_target_rocm_hsaco_fb = #hal.executable.target<"rocm", "rocm-hsaco-fb",
-  {iree.gpu.target = #iree_gpu.target<arch = "gfx942", features = "",
+  {iree_codegen.target_info = #iree_gpu.target<arch = "gfx942", features = "",
                                       wgp = <compute = int32, storage =  b32,
-                                      subgroup =  none, dot =  none, mma = [],
+                                      subgroup =  none,
                                       subgroup_size_choices = [64],
                                       max_workgroup_sizes = [1024, 1024, 1024],
                                       max_thread_count_per_workgroup = 1024,
@@ -62,14 +60,12 @@ builtin.module {
 builtin.module {
   hal.executable public @test_kern_arg {
     hal.executable.variant public @rocm_hsaco_fb target(#executable_target_rocm_hsaco_fb) {
-      hal.executable.export public @test_kern_arg ordinal(0) layout(#pipeline_layout)
-        attributes {subgroup_size = 64 : index, workgroup_size = [128 : index, 2 : index, 1 : index]} {
-      ^bb0(%arg0: !hal.device):
+      hal.executable.export public @test_kern_arg ordinal(0) layout(#pipeline_layout) count(%arg0: !hal.device) -> (index, index, index) {
         %c128 = arith.constant 128 : index
         %c2 = arith.constant 2 : index
         %c1 = arith.constant 1 : index
         hal.return %c128, %c2, %c1 : index, index, index
-      }
+      } attributes {subgroup_size = 64 : index, workgroup_size = [128 : index, 2 : index, 1 : index]}
       builtin.module {
         llvm.func @test_kern_arg(%arg0: i32) {
           llvm.return
@@ -87,9 +83,9 @@ builtin.module {
 // Check that we *do not* annotate kernel arguments on gfx90a (not supported by the firmware).
 
 #executable_target_rocm_hsaco_fb = #hal.executable.target<"rocm", "rocm-hsaco-fb",
-  {iree.gpu.target = #iree_gpu.target<arch = "gfx90a", features = "",
+  {iree_codegen.target_info = #iree_gpu.target<arch = "gfx90a", features = "",
                                       wgp = <compute = int32, storage =  b32,
-                                      subgroup =  none, dot =  none, mma = [],
+                                      subgroup =  none,
                                       subgroup_size_choices = [64],
                                       max_workgroup_sizes = [1024, 1024, 1024],
                                       max_thread_count_per_workgroup = 1024,
@@ -101,14 +97,12 @@ builtin.module {
 builtin.module {
   hal.executable public @test_no_kern_arg {
     hal.executable.variant public @rocm_hsaco_fb target(#executable_target_rocm_hsaco_fb) {
-      hal.executable.export public @test_no_kern_arg ordinal(0) layout(#pipeline_layout)
-        attributes {subgroup_size = 64 : index, workgroup_size = [128 : index, 2 : index, 1 : index]} {
-      ^bb0(%arg0: !hal.device):
+      hal.executable.export public @test_no_kern_arg ordinal(0) layout(#pipeline_layout) count(%arg0: !hal.device) -> (index, index, index) {
         %c128 = arith.constant 128 : index
         %c2 = arith.constant 2 : index
         %c1 = arith.constant 1 : index
         hal.return %c128, %c2, %c1 : index, index, index
-      }
+      } attributes {subgroup_size = 64 : index, workgroup_size = [128 : index, 2 : index, 1 : index]}
       builtin.module {
         llvm.func @test_no_kern_arg(%arg0: i32) {
           llvm.return

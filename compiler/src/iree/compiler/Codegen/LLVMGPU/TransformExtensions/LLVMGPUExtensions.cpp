@@ -34,6 +34,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Transform/Interfaces/TransformInterfaces.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/Dialect/Vector/Transforms/VectorDistribution.h"
@@ -49,7 +50,6 @@ using llvm::dbgs;
 #define DEBUG_VECTOR_TO_MMA "transform-llvmgpu-extensions-vector-to-mma"
 
 #define DBGS() (dbgs() << '[' << DEBUG_TYPE << "] ")
-#define LDBG(X) LLVM_DEBUG(dbgs() << '[' << DEBUG_TYPE << "] " << X)
 #define DBGS_ALIAS() (dbgs() << '[' << DEBUG_TYPE_ALIAS << "] ")
 #define DBGS_VECTOR_TO_MMA() (dbgs() << '[' << DEBUG_VECTOR_TO_MMA << "] ")
 
@@ -192,15 +192,15 @@ static FailureOr<gpu::ThreadIdOp> isThreadIdxxZeroPredicate(scf::IfOp ifOp) {
   if (auto threadIdOp = pred.getLhs().getDefiningOp<gpu::ThreadIdOp>()) {
     if (threadIdOp.getDimension() != gpu::Dimension::x)
       return failure();
-    if (pred.getPredicate() == EQ && isConstantIntValue(pred.getRhs(), 0))
+    if (pred.getPredicate() == EQ && isZeroInteger(pred.getRhs()))
       return threadIdOp;
-    if (pred.getPredicate() == SLE && isConstantIntValue(pred.getRhs(), 0))
+    if (pred.getPredicate() == SLE && isZeroInteger(pred.getRhs()))
       return threadIdOp;
-    if (pred.getPredicate() == ULE && isConstantIntValue(pred.getRhs(), 0))
+    if (pred.getPredicate() == ULE && isZeroInteger(pred.getRhs()))
       return threadIdOp;
-    if (pred.getPredicate() == SLT && isConstantIntValue(pred.getRhs(), 1))
+    if (pred.getPredicate() == SLT && isOneInteger(pred.getRhs()))
       return threadIdOp;
-    if (pred.getPredicate() == ULT && isConstantIntValue(pred.getRhs(), 1))
+    if (pred.getPredicate() == ULT && isOneInteger(pred.getRhs()))
       return threadIdOp;
   }
   auto SGT = arith::CmpIPredicate::sgt;
@@ -210,15 +210,15 @@ static FailureOr<gpu::ThreadIdOp> isThreadIdxxZeroPredicate(scf::IfOp ifOp) {
   if (auto threadIdOp = pred.getRhs().getDefiningOp<gpu::ThreadIdOp>()) {
     if (threadIdOp.getDimension() != gpu::Dimension::x)
       return failure();
-    if (pred.getPredicate() == EQ && isConstantIntValue(pred.getLhs(), 0))
+    if (pred.getPredicate() == EQ && isZeroInteger(pred.getLhs()))
       return threadIdOp;
-    if (pred.getPredicate() == SGE && isConstantIntValue(pred.getLhs(), 0))
+    if (pred.getPredicate() == SGE && isZeroInteger(pred.getLhs()))
       return threadIdOp;
-    if (pred.getPredicate() == UGE && isConstantIntValue(pred.getLhs(), 0))
+    if (pred.getPredicate() == UGE && isZeroInteger(pred.getLhs()))
       return threadIdOp;
-    if (pred.getPredicate() == SGT && isConstantIntValue(pred.getLhs(), 1))
+    if (pred.getPredicate() == SGT && isOneInteger(pred.getLhs()))
       return threadIdOp;
-    if (pred.getPredicate() == UGT && isConstantIntValue(pred.getLhs(), 1))
+    if (pred.getPredicate() == UGT && isOneInteger(pred.getLhs()))
       return threadIdOp;
   }
   return failure();
@@ -392,23 +392,6 @@ static OpOperand *getWarpResult(gpu::WarpExecuteOnLane0Op warpOp,
 }
 
 namespace {
-/// Pattern to convert InsertElement to broadcast, this is a workaround
-/// until MultiDimReduction distribution is supported.
-class InsertElementToBroadcast final
-    : public OpRewritePattern<vector::InsertElementOp> {
-public:
-  using OpRewritePattern<vector::InsertElementOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(vector::InsertElementOp insertOp,
-                                PatternRewriter &rewriter) const override {
-    if (insertOp.getDestVectorType().getNumElements() != 1)
-      return failure();
-    rewriter.replaceOpWithNewOp<vector::BroadcastOp>(
-        insertOp, insertOp.getDestVectorType(), insertOp.getSource());
-    return success();
-  }
-};
-
 /// Sink out load op feeding into a warp op yield.
 /// ```
 /// %0 = vector.warp_execute_on_lane_0(%arg0) -> (f32) {
@@ -427,7 +410,7 @@ public:
 /// gpu.synchronize
 /// %0 = memref.load %src[%c0] : memref<1024xf32>
 struct WarpOpLoad : public OpRewritePattern<gpu::WarpExecuteOnLane0Op> {
-  using OpRewritePattern<gpu::WarpExecuteOnLane0Op>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(gpu::WarpExecuteOnLane0Op warpOp,
                                 PatternRewriter &rewriter) const override {
     OpOperand *operand = getWarpResult(warpOp, llvm::IsaPred<memref::LoadOp>);
@@ -471,7 +454,7 @@ struct WarpOpLoad : public OpRewritePattern<gpu::WarpExecuteOnLane0Op> {
 /// really have the semantic of global variables. Therefore hoisting them is
 /// always correct for static allocations.
 struct HoistSharedMemoryAlloc : public OpRewritePattern<memref::AllocOp> {
-  using OpRewritePattern<memref::AllocOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(memref::AllocOp alloc,
                                 PatternRewriter &rewriter) const override {
     if (!iree_compiler::hasSharedMemoryAddressSpace(alloc.getType()))
@@ -499,7 +482,6 @@ static void populateMultiReductionLoweringPatterns(Operation *target,
 
   vector::populateVectorMultiReductionLoweringPatterns(
       patterns, vector::VectorMultiReductionLowering::InnerReduction, benefit);
-  patterns.add<InsertElementToBroadcast>(target->getContext(), benefit);
 }
 
 static AffineMap simpleDistributionFunction(Value val) {
@@ -605,7 +587,7 @@ transform_dialect::VectorWarpDistributionOp::applyToOne(
     (void)listener.checkAndResetError();
   });
   GreedyRewriteConfig config;
-  config.listener = &listener;
+  config.setListener(&listener);
   if (failed(applyPatternsGreedily(target, std::move(preProcessingPatterns),
                                    config))) {
     return mlir::emitDefiniteFailure(target,
@@ -671,7 +653,7 @@ transform_dialect::VectorToMMAConversionOp::applyToOne(
   MLIRContext *ctx = target->getContext();
   ErrorCheckingTrackingListener listener(state, *this);
   GreedyRewriteConfig config;
-  config.listener = &listener;
+  config.setListener(&listener);
 
   // Unrolling to native vector size must have previously occurred.
   // TODO: Add pattern to propagate the extract through the scf.for
@@ -736,10 +718,12 @@ DiagnosedSilenceableFailure transform_dialect::PromoteOperandsOp::applyToOne(
 
   results.push_back(target);
   bufferization::BufferizationOptions options;
+  bufferization::BufferizationState bufferizationState;
   for (int64_t index : indices) {
     if ((index >= 0) && (index < numOperands)) {
       FailureOr<Value> ret = bufferization::allocateTensorForShapedValue(
-          rewriter, loc, target->getOperand(index), options);
+          rewriter, loc, target->getOperand(index), options,
+          bufferizationState);
       if (failed(ret)) {
         return emitDefaultDefiniteFailure(target)
                << "failed to promote operand";
@@ -1363,7 +1347,7 @@ namespace {
 /// Polygeist.
 class BarrierElimination final : public OpRewritePattern<gpu::BarrierOp> {
 public:
-  using OpRewritePattern<gpu::BarrierOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(gpu::BarrierOp barrier,
                                 PatternRewriter &rewriter) const override {
@@ -1410,7 +1394,7 @@ transform_dialect::EliminateGpuBarriersOp::applyToOne(
     (void)listener.checkAndResetError();
   });
   GreedyRewriteConfig config;
-  config.listener = &listener;
+  config.setListener(&listener);
   if (failed(applyPatternsGreedily(target, std::move(patterns), config))) {
     return emitDefaultSilenceableFailure(target);
   }
@@ -1454,16 +1438,6 @@ transform_dialect::PrefetchSharedMemoryCopiesOp::applyToOne(
   results.push_back(pipelinedFor.value());
   return DiagnosedSilenceableFailure::success();
 }
-
-class TransformVectorLayoutOptions : public VectorLayoutOptions {
-public:
-  TransformVectorLayoutOptions(Operation *root, bool fullConversion)
-      : VectorLayoutOptions(root, fullConversion) {}
-
-  VectorLayoutInterface getDefaultLayout(VectorType type) const override {
-    return VectorLayoutInterface();
-  }
-};
 
 DiagnosedSilenceableFailure
 transform_dialect::AMDGPUDistributeVectorsOp::applyToOne(

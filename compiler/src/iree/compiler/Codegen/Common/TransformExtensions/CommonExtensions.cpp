@@ -22,7 +22,6 @@
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "iree/compiler/Codegen/Utils/MarkerUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "iree/compiler/Dialect/LinalgExt/IR/LinalgExtOps.h"
 #include "llvm/ADT/STLExtras.h"
@@ -137,7 +136,7 @@ namespace {
 // TODO: atm hardcoded on linalg.fill but we could take any result of any
 // generic that yields a constant in that result.
 struct FoldFillIntoPad : public OpRewritePattern<tensor::PadOp> {
-  using OpRewritePattern<tensor::PadOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(tensor::PadOp padOp,
                                 PatternRewriter &rewriter) const final {
     Operation *currentOp = padOp.getSource().getDefiningOp();
@@ -647,6 +646,21 @@ void transform_dialect::HoistStaticAllocOp::getEffects(
 }
 
 //===---------------------------------------------------------------------===//
+// MatchHasNoLoweringConfigOp
+//===---------------------------------------------------------------------===//
+
+DiagnosedSilenceableFailure
+IREE::transform_dialect::MatchHasNoLoweringConfigOp::matchOperation(
+    Operation *current, transform::TransformResults &results,
+    transform::TransformState &state) {
+  if (getLoweringConfig(current) || getCompilationInfo(current)) {
+    return emitSilenceableError()
+           << "payload has a lowering config or compilation info.";
+  }
+  return DiagnosedSilenceableFailure::success();
+}
+
+//===---------------------------------------------------------------------===//
 // PopulateWorkgroupCountRegionUsingNumThreadsSliceOp
 //===---------------------------------------------------------------------===//
 
@@ -864,24 +878,21 @@ static IREEOneShotBufferizationOptions getBufferizationOptions() {
   // options.testAnalysisOnly = testAnalysisOnly;
   // options.printConflicts = printConflicts;
 
-  // bufferization.to_memref is used to bufferize constants in IREE. IREE has
+  // bufferization.to_buffer is used to bufferize constants in IREE. IREE has
   // it's own logic to handle constants. We'd like to leave the arith.constant
-  // as is and insert bufferization.to_memref to convert the tensor to memref.
+  // as is and insert bufferization.to_buffer to convert the tensor to memref.
   options.opFilter.denyOperation<arith::ConstantOp>();
-  options.opFilter.denyOperation<bufferization::ToMemrefOp>();
+  options.opFilter.denyOperation<bufferization::ToBufferOp>();
 
   // This type converter converts tensor types to memref types when no exact
   // memref type can be inferred from the context.
-  options.unknownTypeConverterFn = [](Value value, Attribute memorySpace,
+  options.unknownTypeConverterFn = [](TensorType tensorType,
+                                      Attribute memorySpace,
                                       const BufferizationOptions &options) {
-    auto tensorType = llvm::cast<TensorType>(value.getType());
-
-    // Special rule for ConstantOps: These always lower to some memref with a
-    // static identity layout.
-    if (value.getDefiningOp<arith::ConstantOp>())
+    if (tensorType.hasStaticShape()) {
       return bufferization::getMemRefTypeWithStaticIdentityLayout(tensorType,
                                                                   memorySpace);
-
+    }
     // Default case: Fully dynamic layout map for best compatibility.
     return bufferization::getMemRefTypeWithFullyDynamicLayout(tensorType,
                                                               memorySpace);
@@ -893,7 +904,7 @@ static IREEOneShotBufferizationOptions getBufferizationOptions() {
 namespace {
 /// Pattern to rewrite tensor.empty to tensor.alloc.
 struct EmptyTensorLoweringPattern : public OpRewritePattern<tensor::EmptyOp> {
-  using OpRewritePattern<tensor::EmptyOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(tensor::EmptyOp op,
                                 PatternRewriter &rewriter) const override {
@@ -926,7 +937,7 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
     RewritePatternSet patterns(getContext());
     patterns.add<EmptyTensorLoweringPattern>(patterns.getContext());
     GreedyRewriteConfig config;
-    config.listener = &listener;
+    config.setListener(&listener);
     // Manually gather list of ops because the other GreedyPatternRewriteDriver
     // overloads only accepts ops that are isolated from above.
     LogicalResult result =
@@ -954,7 +965,8 @@ DiagnosedSilenceableFailure transform_dialect::IREEBufferizeOp::apply(
       return addressSpaceAttr;
     };
   }
-  if (failed(runIREEOneShotBufferize(target, options))) {
+  bufferization::BufferizationState bufferizationState;
+  if (failed(runIREEOneShotBufferize(target, options, bufferizationState))) {
     return mlir::emitDefiniteFailure(target, "bufferization failed");
   }
 
@@ -1202,16 +1214,16 @@ applyFuseConsumer(RewriterBase &rewriter, Operation *transformOp,
     rewriter.setInsertionPoint(target);
 
     FailureOr<scf::SCFFuseConsumerOfSliceResult> fuseConsumerResults =
-        scf::tileAndFuseConsumerOfSlice(rewriter, target, loops);
+        scf::tileAndFuseConsumerOfSlices(rewriter, target, loops);
 
     if (failed(fuseConsumerResults))
       return failure();
 
     // Report back the relevant handles to the transform op.
     originalConsumerOps.push_back(
-        fuseConsumerResults->origConsumerOperand->getOwner());
+        fuseConsumerResults->origConsumerOperands.front()->getOwner());
     fusedConsumerOps.push_back(
-        fuseConsumerResults->tiledAndFusedConsumerOperand->getOwner());
+        fuseConsumerResults->tiledAndFusedConsumerOperands.front()->getOwner());
   }
 
   transformResults.set(transformOp->getOpResult(0), originalConsumerOps);
@@ -1242,6 +1254,7 @@ DiagnosedSilenceableFailure transform_dialect::FuseConsumerOp::apply(
 void transform_dialect::FuseConsumerOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
   transform::consumesHandle(getTargetMutable(), effects);
+  transform::consumesHandle(getLoopsMutable(), effects);
   transform::producesHandle(getOperation()->getOpResults(), effects);
   transform::modifiesPayload(effects);
 }

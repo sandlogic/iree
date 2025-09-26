@@ -784,7 +784,7 @@ MemRefDescriptor HALDispatchABI::loadBinding(Operation *forOp, int64_t ordinal,
   auto [strides, offset] = memRefType.getStridesAndOffset();
   if (memRefType.hasStaticShape() &&
       !llvm::any_of(strides, ShapedType::isDynamic) &&
-      !ShapedType::isDynamic(offset)) {
+      ShapedType::isStatic(offset)) {
     return MemRefDescriptor::fromStaticShape(builder, loc, *typeConverter,
                                              memRefType, basePtrValue);
   } else {
@@ -879,10 +879,10 @@ Value HALDispatchABI::updateProcessorDataFromTargetAttr(
   if (!targetAttr) {
     return processorDataPtrValue;
   }
+  DictionaryAttr targetConfig = targetAttr.getConfiguration();
 
   // Lookup CPU features.
-  std::optional<NamedAttribute> cpuFeatures =
-      targetAttr.getConfiguration().getNamed("cpu_features");
+  std::optional<StringRef> cpuFeatures = getConfigCpuFeatures(targetConfig);
   if (!cpuFeatures) {
     return processorDataPtrValue;
   }
@@ -897,7 +897,7 @@ Value HALDispatchABI::updateProcessorDataFromTargetAttr(
     // Instead we should use a reflection callback to resolve arch guarded
     // features directly in the compiler.
     llvm::StringMap<uint64_t> featureToBitPattern;
-    auto targetTriple = getTargetTriple(targetAttr);
+    auto targetTriple = getTargetTriple(targetConfig);
     if (!targetTriple) {
       return processorDataPtrValue;
     }
@@ -913,9 +913,8 @@ Value HALDispatchABI::updateProcessorDataFromTargetAttr(
 
     // Find CPU features in featureToBitPattern
     SmallVector<StringRef> cpuFeatureStrings;
-    llvm::cast<StringAttr>(cpuFeatures->getValue())
-        .getValue()
-        .split(cpuFeatureStrings, ',', /*MakeSplit=*/-1, /*KeepEmpty=*/false);
+    cpuFeatures.value().split(cpuFeatureStrings, ',', /*MakeSplit=*/-1,
+                              /*KeepEmpty=*/false);
     for (auto featureString : cpuFeatureStrings) {
       // CPU features are typically prefixed with a +, e.g. +avx,+avx2,+fma.
       featureString.consume_front("+");
@@ -952,11 +951,12 @@ Value HALDispatchABI::updateProcessorDataFromTargetAttr(
   for (int64_t i = 1, e = ProcessorDataCapacity; i < e; ++i) {
     Value loadPtr = builder.create<LLVM::GEPOp>(
         loc, processorDataPtrValue.getType(), i64Ty, processorDataPtrValue,
-        LLVM::GEPArg(int32_t(i)), /*inbounds =*/true);
+        LLVM::GEPArg(int32_t(i)),
+        /*noWrapFlags =*/LLVM::GEPNoWrapFlags::inbounds);
     Value loadVal = builder.create<LLVM::LoadOp>(loc, i64Ty, loadPtr);
     Value storePtr = builder.create<LLVM::GEPOp>(
         loc, alloca.getType(), i64Ty, alloca, LLVM::GEPArg(int32_t(i)),
-        /*inbounds =*/true);
+        /*noWrapFlags =*/LLVM::GEPNoWrapFlags::inbounds);
     builder.create<LLVM::StoreOp>(loc, loadVal, storePtr);
   }
   return alloca;
@@ -978,12 +978,12 @@ Value HALDispatchABI::loadProcessorData(Operation *forOp, OpBuilder &builder) {
       loc, LLVM::LLVMPointerType::get(context),
       LLVM::LLVMPointerType::get(context), environmentPtrValue,
       LLVM::GEPArg(int32_t(EnvironmentField::processor)),
-      /*inbounds=*/true);
+      /*noWrapFlags =*/LLVM::GEPNoWrapFlags::inbounds);
   Value processorDataPtrValue = builder.create<LLVM::GEPOp>(
       loc, LLVM::LLVMPointerType::get(context),
       LLVM::LLVMPointerType::get(context), processorPtrValue,
       LLVM::GEPArg(int32_t(ProcessorField::data)),
-      /*inbounds=*/true);
+      /*noWrapFlags =*/LLVM::GEPNoWrapFlags::inbounds);
   Value updatedProcessorData =
       updateProcessorDataFromTargetAttr(forOp, processorDataPtrValue, builder);
   return buildValueDI(forOp, updatedProcessorData, "processor_data",

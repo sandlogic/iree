@@ -70,10 +70,11 @@ public:
       addGPUBaseLoweringPassPipeline(pipeline);
       break;
     case CodeGenPipeline::LLVMGPUWarpReduction:
-      addGPUWarpReductionPassPipeline(pipeline);
+      addGPUWarpReductionPassPipeline(pipeline, /*forROCDL=*/true);
       break;
     case CodeGenPipeline::LLVMGPUTileAndFuse:
-      addGPUTileAndFusePassPipeline(pipeline, pipelineOptions);
+      addGPUTileAndFusePassPipeline(pipeline, pipelineOptions,
+                                    /*forROCDL=*/true);
       break;
     // If no pipeline specified, then nothing to do.
     case IREE::Codegen::DispatchLoweringPassPipeline::None:

@@ -6,16 +6,18 @@
 
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 // TODO(benvanik): have a stream/upstream equivalent of the flow.dispatch.* ops.
-#include "iree/compiler/Dialect/Flow/IR/FlowDialect.h"
-#include "iree/compiler/Dialect/Flow/IR/FlowOps.h"
+#include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
+#include "iree/compiler/Dialect/Encoding/Utils/ElementPackingUtils.h"
+#include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamDialect.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamOps.h"
 #include "iree/compiler/Dialect/Stream/IR/StreamTypes.h"
 #include "iree/compiler/Dialect/Stream/Transforms/Passes.h"
+#include "iree/compiler/Dialect/TensorExt/IR/TensorExtOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilDialect.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
 #include "iree/compiler/Dialect/Util/IR/UtilTypes.h"
-#include "iree/compiler/Utils/ElementPackingUtils.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
@@ -45,11 +47,15 @@ namespace {
 static LogicalResult checkEncoding(Operation *op, RankedTensorType encodingType,
                                    ValueRange encodingDims,
                                    PatternRewriter &rewriter) {
-  auto encoding = encodingType.getEncoding();
-  if (encoding && !llvm::isa<IREE::Encoding::EncodingAttr,
-                             IREE::Encoding::PackedStorageAttr>(encoding)) {
+  if (llvm::isa_and_nonnull<IREE::Encoding::PackedStorageAttr>(
+          encodingType.getEncoding())) {
+    return success();
+  }
+
+  auto serializableEncoding = IREE::Encoding::getSerializableAttr(encodingType);
+  if (serializableEncoding && !serializableEncoding.isSerialized()) {
     return rewriter.notifyMatchFailure(op, [=](Diagnostic &d) {
-      d << "unsupported tensor encoding: " << encodingType;
+      d << "unsupported (unserialized) tensor encoding: " << encodingType;
     });
   }
   return success();
@@ -650,15 +656,15 @@ struct EncodeHostTensorsPass
 // stream.binding.subspan
 //===----------------------------------------------------------------------===//
 
-// Aligns the element type of a !flow.dispatch.tensor<> to a byte-aligned power
-// of 2 bit width.
-static IREE::Flow::DispatchTensorType
-alignDispatchTensorType(IREE::Flow::DispatchTensorType originalType) {
+// Aligns the element type of a !iree_tensor_ext.dispatch.tensor<> to a
+// byte-aligned power of 2 bit width.
+static IREE::TensorExt::DispatchTensorType
+alignDispatchTensorType(IREE::TensorExt::DispatchTensorType originalType) {
   Type elementType = originalType.getBoundElementType();
   Type alignedType = legalizeStorageElementType(elementType);
   if (alignedType == elementType)
     return originalType;
-  return IREE::Flow::DispatchTensorType::get(
+  return IREE::TensorExt::DispatchTensorType::get(
       originalType.getAccess(), originalType.getShape(), alignedType);
 }
 
@@ -674,14 +680,14 @@ struct EncodeBindingSubspanOp
   using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(IREE::Stream::BindingSubspanOp op,
                                 PatternRewriter &rewriter) const override {
-    auto originalType = llvm::dyn_cast<IREE::Flow::DispatchTensorType>(
+    auto originalType = llvm::dyn_cast<IREE::TensorExt::DispatchTensorType>(
         op.getResult().getType());
     if (!originalType) {
       return rewriter.notifyMatchFailure(op, "binding type not supported");
     }
 
     // Align the element type, if needed.
-    IREE::Flow::DispatchTensorType alignedType =
+    IREE::TensorExt::DispatchTensorType alignedType =
         alignDispatchTensorType(originalType);
     if (originalType == alignedType)
       return failure(); // already aligned.
@@ -696,13 +702,13 @@ struct EncodeBindingSubspanOp
 };
 
 //===----------------------------------------------------------------------===//
-// flow.dispatch.tensor.load
+// iree_tensor_ext.dispatch.tensor.load
 //===----------------------------------------------------------------------===//
 
 struct EncodeDispatchTensorLoadOp
-    : public OpRewritePattern<IREE::Flow::DispatchTensorLoadOp> {
+    : public OpRewritePattern<IREE::TensorExt::DispatchTensorLoadOp> {
   using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(IREE::Flow::DispatchTensorLoadOp op,
+  LogicalResult matchAndRewrite(IREE::TensorExt::DispatchTensorLoadOp op,
                                 PatternRewriter &rewriter) const override {
     auto targetType = llvm::cast<RankedTensorType>(op.getResult().getType());
 
@@ -730,13 +736,13 @@ struct EncodeDispatchTensorLoadOp
 };
 
 //===----------------------------------------------------------------------===//
-// flow.dispatch.tensor.store
+// iree_tensor_ext.dispatch.tensor.store
 //===----------------------------------------------------------------------===//
 
 struct EncodeDispatchTensorStoreOp
-    : public OpRewritePattern<IREE::Flow::DispatchTensorStoreOp> {
+    : public OpRewritePattern<IREE::TensorExt::DispatchTensorStoreOp> {
   using OpRewritePattern::OpRewritePattern;
-  LogicalResult matchAndRewrite(IREE::Flow::DispatchTensorStoreOp op,
+  LogicalResult matchAndRewrite(IREE::TensorExt::DispatchTensorStoreOp op,
                                 PatternRewriter &rewriter) const override {
     auto sourceType = llvm::cast<RankedTensorType>(op.getValue().getType());
 

@@ -131,7 +131,7 @@ namespace {
 
 struct ResolveExtractMetadataFromHalInterfaceBindingSubspan
     : public OpRewritePattern<memref::ExtractStridedMetadataOp> {
-  using OpRewritePattern<memref::ExtractStridedMetadataOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(memref::ExtractStridedMetadataOp op,
                                 PatternRewriter &rewriter) const override {
     auto binding =
@@ -266,8 +266,12 @@ struct IREEExpandStridedMetadataPass final
 } // namespace
 
 void populateIREEResolveExtractStridedMetadataPatterns(
-    RewritePatternSet &patterns) {
-  memref::populateResolveExtractStridedMetadataPatterns(patterns);
+    RewritePatternSet &patterns, bool allowSubviewExpansion) {
+  if (allowSubviewExpansion) {
+    memref::populateExpandStridedMetadataPatterns(patterns);
+  } else {
+    memref::populateResolveExtractStridedMetadataPatterns(patterns);
+  }
   amdgpu::populateAmdgpuResolveStridedMetadataPatterns(patterns);
   patterns.insert<ResolveExtractMetadataFromHalInterfaceBindingSubspan>(
       patterns.getContext());
@@ -278,8 +282,8 @@ void populateIREEResolveExtractStridedMetadataPatterns(
 void IREEExpandStridedMetadataPass::runOnOperation() {
   MLIRContext *context = &getContext();
   RewritePatternSet patterns(context);
-  populateIREEResolveExtractStridedMetadataPatterns(patterns);
-  populateRemoveDeadMemAllocPatterns(patterns);
+  populateIREEResolveExtractStridedMetadataPatterns(patterns,
+                                                    allowSubviewExpansion);
   if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
     return signalPassFailure();
   }

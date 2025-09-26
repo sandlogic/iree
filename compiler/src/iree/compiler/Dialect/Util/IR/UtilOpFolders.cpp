@@ -30,16 +30,28 @@ namespace mlir::iree_compiler::IREE::Util {
 // util.assume.int
 //===----------------------------------------------------------------------===//
 
-LogicalResult AssumeIntOp::canonicalize(AssumeIntOp op,
-                                        PatternRewriter &rewriter) {
+static std::optional<uint64_t>
+getIntAssumptionFixedValue(ArrayAttr assumptions) {
+  if (assumptions.size() != 1) {
+    return std::nullopt;
+  } else if (auto assumption = dyn_cast<IREE::Util::IntAssumptionAttr>(
+                 assumptions.getValue().front())) {
+    if (assumption.getUmin().has_value() && assumption.getUmax().has_value() &&
+        assumption.getUmin() == assumption.getUmax()) {
+      return assumption.getUmin();
+    }
+  }
+  return std::nullopt;
+}
+
+static LogicalResult canonicalizeAssumeIntOp(AssumeIntOp op,
+                                             PatternRewriter &rewriter) {
   bool needsRewrite = false;
   ArrayAttr assumptions = op.getAssumptions();
 
   // We do a fast check for the canonical form here, making any in-place updates
   // we can and signalling needsRewrite=true when the op needs to be updated
   // to a new canonical form.
-  SmallPtrSet<Value, 4> seenOperands;
-  seenOperands.reserve(op.getNumOperands());
   for (auto [idx, operand] : llvm::enumerate(op.getOperands())) {
     // Match constant.
     if (matchPattern(operand, m_Constant())) {
@@ -48,22 +60,8 @@ LogicalResult AssumeIntOp::canonicalize(AssumeIntOp op,
       continue;
     }
 
-    // Check for a duplicate.
-    auto [foundIt, inserted] = seenOperands.insert(operand);
-    if (!inserted) {
-      // This should be the non-common path: find the original index number
-      // and rewrite.
-      for (auto [seenIdx, seenOperand] : llvm::enumerate(op.getOperands())) {
-        if (seenOperand == operand) {
-          needsRewrite = true;
-          rewriter.replaceAllUsesWith(op.getResult(idx), op.getResult(seenIdx));
-          break;
-        }
-      }
-      continue;
-    }
-
-    // Detect whether assumptions need to be normalized.
+    // Detect whether assumptions need to be normalized or can fold to a single
+    // value.
     ArrayAttr assumptionRow = llvm::cast<ArrayAttr>(assumptions[idx]);
     if (assumptionRow.size() > 1) {
       bool allAssumptionsSame = true;
@@ -74,8 +72,11 @@ LogicalResult AssumeIntOp::canonicalize(AssumeIntOp op,
         }
       }
       if (allAssumptionsSame) {
+        // May _also_ fold to a single fixed value once normalized below.
         needsRewrite = true;
       }
+    } else if (getIntAssumptionFixedValue(assumptionRow).has_value()) {
+      needsRewrite = true;
     }
   }
   if (!needsRewrite)
@@ -107,16 +108,35 @@ LogicalResult AssumeIntOp::canonicalize(AssumeIntOp op,
   SmallVector<Value> retainedResults;
   bool madeChange = false;
   for (auto [idx, operand] : llvm::enumerate(op.getOperands())) {
+    Value result = op.getResult(idx);
+
     // If the result has no uses, do not retain it.
-    if (op.getResult(idx).use_empty()) {
+    if (result.use_empty()) {
       madeChange = true;
       continue;
     }
 
-    newAssumptions.push_back(
-        normalizeAssumptions(assumptions[idx], madeChange));
+    // If the assumption expresses a single possible value then replace all uses
+    // with that constant value and do not retain it.
+    auto newAssumption = normalizeAssumptions(assumptions[idx], madeChange);
+    auto fixedValue = getIntAssumptionFixedValue(newAssumption);
+    if (fixedValue.has_value()) {
+      Value constantValue;
+      if (result.getType().isIndex()) {
+        constantValue =
+            rewriter.create<arith::ConstantIndexOp>(op.getLoc(), *fixedValue);
+      } else {
+        constantValue = rewriter.create<arith::ConstantIntOp>(
+            op.getLoc(), result.getType(), *fixedValue);
+      }
+      rewriter.replaceAllUsesWith(result, constantValue);
+      madeChange = true;
+      continue;
+    }
+
+    newAssumptions.push_back(newAssumption);
     newOperands.push_back(operand);
-    retainedResults.push_back(op.getResult(idx));
+    retainedResults.push_back(result);
   }
 
   // It is important to avoid canonicalizer looping that if we determined at
@@ -133,6 +153,168 @@ LogicalResult AssumeIntOp::canonicalize(AssumeIntOp op,
 
   rewriter.eraseOp(op);
   return success();
+}
+
+static IntAssumptionAttr getUnionedRange(IntAssumptionAttr l,
+                                         IntAssumptionAttr r) {
+  // Min is the larger minimum between the two ranges.
+  std::optional<int64_t> newMin =
+      l.getUmin() ? std::max(r.getUmin().value_or(*l.getUmin()), *l.getUmin())
+                  : r.getUmin();
+  // Max is the smaller maximum between the two ranges.
+  std::optional<int64_t> newMax =
+      l.getUmax() ? std::min(r.getUmax().value_or(*l.getUmax()), *l.getUmax())
+                  : r.getUmax();
+  // Divisible by both means divisible by the lcm.
+  std::optional<int64_t> newDiv =
+      l.getUdiv() ? std::lcm(r.getUdiv().value_or(*l.getUdiv()), *l.getUdiv())
+                  : r.getUdiv();
+  return IntAssumptionAttr::get(l.getContext(), newMin, newMax, newDiv);
+}
+
+static ArrayAttr getZippedAssumeRange(Builder &b, ArrayAttr l, ArrayAttr r) {
+  assert(l && "unexpected null lhs");
+  if (!r || l == r) {
+    return l;
+  }
+
+  int64_t lSize = l.size();
+  int64_t rSize = r.size();
+  // Shortcut for both unit ranges.
+  if (lSize == rSize && lSize == 1) {
+    return b.getArrayAttr({getUnionedRange(cast<IntAssumptionAttr>(l[0]),
+                                           cast<IntAssumptionAttr>(r[0]))});
+  }
+
+  int64_t resultSize = std::max(lSize, rSize);
+  assert((lSize == resultSize || lSize == 1) &&
+         "invalid assume range size mismatch");
+  assert((rSize == resultSize || rSize == 1) &&
+         "invalid assume range size mismatch");
+  SmallVector<Attribute> newRanges;
+  newRanges.reserve(resultSize);
+  // At this point we're guaranteed that at least one of the ranges is non-unit.
+  // Broadcast the unit range if present by not incrementing it's iterator.
+  for (int i = 0, j = 0; i < resultSize && j < resultSize;
+       i += (lSize != 1), j += (rSize != 1)) {
+    newRanges.push_back(getUnionedRange(cast<IntAssumptionAttr>(l[i]),
+                                        cast<IntAssumptionAttr>(r[j])));
+  }
+  return b.getArrayAttr(newRanges);
+}
+
+namespace {
+
+/// Deduplicates operands, merging assume ranges along the way.
+struct DeduplicateOperands : public OpRewritePattern<AssumeIntOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AssumeIntOp op,
+                                PatternRewriter &rewriter) const override {
+    ArrayAttr assumptions = op.getAssumptions();
+
+    llvm::SmallDenseMap<Value, ArrayAttr> assumptionReplacements;
+    for (auto [idx, operand] : llvm::enumerate(op.getOperands())) {
+      auto currentRow = cast<ArrayAttr>(assumptions[idx]);
+      auto existingRow = dyn_cast_if_present<ArrayAttr>(
+          assumptionReplacements.lookup_or(operand, ArrayAttr()));
+      ArrayAttr zippedRow =
+          getZippedAssumeRange(rewriter, currentRow, existingRow);
+
+      // Update the entry if present and different, or add a new entry with the
+      // zippedRow == currentRow if not present.
+      if ((existingRow && existingRow != zippedRow) || !existingRow) {
+        assumptionReplacements[operand] = zippedRow;
+      }
+    }
+
+    // If the map contains an entry per operand, no duplicates present.
+    if (assumptionReplacements.size() == op->getNumOperands()) {
+      return failure();
+    }
+
+    SmallVector<ArrayAttr> newRanges;
+    SmallVector<Value> newOperands;
+    llvm::SmallDenseMap<Value, int64_t> resultReplacementMap;
+    SmallVector<Value> valuesToReplace;
+    valuesToReplace.reserve(assumptionReplacements.size());
+    for (auto [idx, operand] : llvm::enumerate(op.getOperands())) {
+      auto [existingIdx, didInsert] =
+          resultReplacementMap.insert({operand, idx});
+      if (didInsert) {
+        valuesToReplace.push_back(op.getResult(idx));
+        newRanges.push_back(assumptionReplacements[operand]);
+        newOperands.push_back(operand);
+      } else {
+        // Replace all the uses of deleted results now to avoid the need to
+        // re-iterate over results after constructing the new assume.
+        rewriter.replaceAllUsesWith(op.getResult(idx),
+                                    op.getResult(existingIdx->getSecond()));
+      }
+    }
+
+    auto newOp =
+        rewriter.create<AssumeIntOp>(op.getLoc(), newOperands, newRanges);
+    rewriter.replaceAllUsesWith(valuesToReplace, newOp.getResults());
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+/// Folds sequences of cancelling multiplications and divisions based on
+/// assumes, i.e.
+///
+/// %0 = util.assume.int ... <[..., udiv = Y]>
+/// %1 = arith.divui %0, X
+/// %2 = arith.muli %1, X
+///
+/// Where X | Y.
+struct FoldDivMulOfAssume : public OpRewritePattern<arith::MulIOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(arith::MulIOp mulOp,
+                                PatternRewriter &rewriter) const override {
+    APInt mulConstantInt;
+    if (!matchPattern(mulOp.getRhs(), m_ConstantInt(&mulConstantInt))) {
+      return rewriter.notifyMatchFailure(mulOp, "non-constant mul rhs");
+    }
+
+    auto divOp = mulOp.getLhs().getDefiningOp<arith::DivUIOp>();
+    if (!divOp) {
+      return rewriter.notifyMatchFailure(mulOp, "non-div lhs producer");
+    }
+
+    APInt divConstantInt;
+    if (!matchPattern(divOp.getRhs(), m_ConstantInt(&divConstantInt))) {
+      return rewriter.notifyMatchFailure(mulOp, "non-constant div rhs");
+    }
+
+    if (mulConstantInt != divConstantInt) {
+      return rewriter.notifyMatchFailure(mulOp,
+                                         "div and mul factors do not match");
+    }
+
+    auto assumeOp = divOp.getLhs().getDefiningOp<AssumeIntOp>();
+    if (!assumeOp) {
+      return rewriter.notifyMatchFailure(mulOp, "non-assume div lhs producer");
+    }
+
+    std::optional<int64_t> maybeUdiv = assumeOp.getUnionedUnsignedDivisor(
+        cast<OpResult>(divOp.getLhs()).getResultNumber());
+    if (!maybeUdiv || maybeUdiv.value() % divConstantInt.getZExtValue() != 0) {
+      return rewriter.notifyMatchFailure(
+          mulOp, "assume divisibility does not equal cancelling mul-div");
+    }
+
+    rewriter.replaceOp(mulOp, divOp.getLhs());
+    return success();
+  }
+};
+
+} // namespace
+
+void AssumeIntOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                              MLIRContext *context) {
+  results.add<DeduplicateOperands, FoldDivMulOfAssume>(context);
+  results.add(canonicalizeAssumeIntOp);
 }
 
 //===----------------------------------------------------------------------===//
@@ -161,7 +343,7 @@ namespace {
 /// Folds cast ops into the result of other ops.
 /// Only safe to apply to ops that don't care about their types.
 struct FoldCastIntoNullOp : public OpRewritePattern<CastOp> {
-  using OpRewritePattern<CastOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(CastOp castOp,
                                 PatternRewriter &rewriter) const override {
     auto nullOp = dyn_cast_or_null<NullOp>(castOp.getOperand().getDefiningOp());
@@ -642,7 +824,7 @@ namespace {
 
 struct ExpandUnfoldableConstantOp
     : public OpRewritePattern<UnfoldableConstantOp> {
-  using OpRewritePattern<IREE::Util::UnfoldableConstantOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(UnfoldableConstantOp op,
                                 PatternRewriter &rewriter) const override {
     auto stdConst = rewriter.create<arith::ConstantOp>(
@@ -683,44 +865,11 @@ struct DropEmptyInitializerOp : public OpRewritePattern<InitializerOp> {
   }
 };
 
-// Inlines constant stores from initializers into the global initializer.
-// This is not strictly required but can help our initialization code perform
-// more efficient initialization of large numbers of primitive values.
-struct InlineConstantGlobalInitializer
-    : public OpRewritePattern<InitializerOp> {
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(InitializerOp op,
-                                PatternRewriter &rewriter) const override {
-    SmallVector<Operation *> deadOps;
-    op.walk([&](GlobalStoreOpInterface storeOp) {
-      Attribute valueAttr;
-      if (!matchPattern(storeOp.getStoredGlobalValue(),
-                        m_Constant(&valueAttr))) {
-        return;
-      }
-      auto globalOp =
-          SymbolTable::lookupNearestSymbolFrom<IREE::Util::GlobalOpInterface>(
-              storeOp->getParentOp(), storeOp.getGlobalAttr());
-      rewriter.modifyOpInPlace(
-          globalOp, [&]() { globalOp.setGlobalInitialValue(valueAttr); });
-
-      deadOps.push_back(storeOp);
-    });
-    if (deadOps.empty())
-      return failure();
-    for (auto deadOp : deadOps)
-      rewriter.eraseOp(deadOp);
-    return success();
-  }
-};
-
 } // namespace
 
 void InitializerOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                                 MLIRContext *context) {
-  results.insert<DropEmptyInitializerOp, InlineConstantGlobalInitializer>(
-      context);
+  results.insert<DropEmptyInitializerOp>(context);
 }
 
 void GlobalOp::getCanonicalizationPatterns(RewritePatternSet &results,
@@ -760,7 +909,7 @@ namespace {
 /// store back to the same global: we want to be able to elide the entire load
 /// and store.
 struct EraseUnusedGlobalStoreOp : public OpRewritePattern<GlobalStoreOp> {
-  using OpRewritePattern<GlobalStoreOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(GlobalStoreOp op,
                                 PatternRewriter &rewriter) const override {

@@ -5,8 +5,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- CPUEncodingExternalModels.cpp --------------------------------------===//
 //
-// This file implements the IREE::Codegen::LayoutAttrInterface for CPU backends
-// and the VMVX backend. In these backends, we transpose narrow-N into narrow-M
+// This file implements the following interfaces for CPU backends and the VMVX
+// backend:
+//
+// - IREE::Encoding::LayoutResolverAttr
+// - IREE::Encoding::SerializableAttr
+// - IREE::Encoding::LayoutMaterializerAttr
+// - IREE::Codegen::PackedLayoutMaterializerAttr
+//
+// In these backends, we transpose narrow-N into narrow-M
 // for a combination of reasons:
 //
 //   1. As linalg.matmul materializes into linalg.mmt4d, which has a transposed
@@ -31,28 +38,67 @@
 #include "iree/compiler/Codegen/ExternalInterfaces/CPUEncodingExternalModels.h"
 
 #include "iree/compiler/Codegen/Dialect/CPU/IR/IREECPUTypes.h"
-#include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenInterfaces.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/IR/IREECodegenTypes.h"
 #include "iree/compiler/Codegen/Dialect/Codegen/Utils/Utils.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/Utils.h"
+#include "iree/compiler/Codegen/Utils/CPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingOps.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
-#include "llvm/Support/Debug.h"
+#include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
+#include "llvm/Support/DebugLog.h"
+#include "llvm/Support/InterleavedRange.h"
 #include "mlir/IR/BuiltinAttributes.h"
 
-#define DEBUG_TYPE "iree-cpu-encoding-external-models"
+#define DEBUG_TYPE "iree-codegen-materialize-encoding"
 
 namespace mlir::iree_compiler::IREE::CPU {
 
-using Codegen::MaterializeEncodingInfo;
-using Codegen::TileMxNxK;
+using IREE::Codegen::MaterializeEncodingInfo;
+using IREE::Codegen::TileMxNxK;
 
 namespace {
 
 //===----------------------------------------------------------------------===//
 // Utilities.
 //===----------------------------------------------------------------------===//
+
+static FailureOr<IREE::Codegen::ScalableTileFlags>
+getScalableTileFlags(linalg::ContractionDimensions cDims,
+                     IREE::Encoding::EncodingAttr encoding,
+                     DictionaryAttr config) {
+  // TODO(egebeysel): I think this isScalable*Enabled flag should be temporary
+  // and the temporary SME flag should probably come next to it.
+  if (!isAArch64(config) || !isScalableVectorizationEnabled()) {
+    LDBG() << "Pre-conditions to enable scalable tiling are not met!";
+    return failure();
+  }
+
+  std::optional<unsigned> mDim =
+      cDims.m.empty() ? std::nullopt
+                      : encoding.mapDimToOperandIndex(cDims.m[0]);
+  std::optional<unsigned> nDim =
+      cDims.n.empty() ? std::nullopt
+                      : encoding.mapDimToOperandIndex(cDims.n[0]);
+  std::optional<unsigned> kDim = encoding.mapDimToOperandIndex(cDims.k[0]);
+  IREE::Codegen::ScalableTileFlags scalableTiles;
+  // TODO(egebeysel): Add logic for SME.
+  if (mDim.has_value()) {
+    if (hasFeature(config, "+sme")) {
+      LDBG() << "SME with data-tiling is not supported yet!";
+      return failure();
+    }
+    scalableTiles.push_back(false);
+  }
+  if (nDim.has_value()) {
+    scalableTiles.push_back(hasFeature(config, "+sve") ||
+                            hasFeature(config, "+sve2"));
+  }
+  if (kDim.has_value()) {
+    scalableTiles.push_back(false);
+  }
+  return scalableTiles;
+}
 
 static void transposeInPlace(MaterializeEncodingInfo &info) {
   // Vector cases: nothing to do.
@@ -97,10 +143,13 @@ getExpandedType(RankedTensorType type, bool isBatched, bool isTransposed,
 
 /// Given an input Value and a desired output element type, create and return
 /// an element-wise linalg::GenericOp that extends the input Value to the
-/// output element type.
+/// output element type. Returns `input` if casting is not needed.
 static Value createElementWiseExtUIOp(OpBuilder &builder, Value input,
                                       Location loc, Type outElemType) {
   auto inputType = cast<RankedTensorType>(input.getType());
+  if (inputType.getElementType() == outElemType) {
+    return input;
+  }
   SmallVector<AffineMap> maps(
       2, builder.getMultiDimIdentityMap(inputType.getRank()));
   SmallVector<utils::IteratorType> iteratorTypes(inputType.getRank(),
@@ -158,22 +207,13 @@ static Value getMmt4dOperand(Value value, linalg::LinalgOp linalgOp,
 /// Returns the best TileMxNxK from `enumeratedTiles` pool. If the
 /// `hostDefinedUpperBound` is not empty, the chosen tile sizes can not be
 /// greater than the values.
-/// TODO(#16933): Remove `hostDefinedUpperBound` once we can propagate such
-/// information to host. For now, they are defined by host.
 TileMxNxK chooseMatmulTile(ArrayRef<TileMxNxK> enumeratedTiles,
-                           IREE::Encoding::MatmulNarrowDim narrowDim,
-                           ArrayRef<int64_t> hostDefinedUpperBound = {}) {
-  assert((hostDefinedUpperBound.empty() || hostDefinedUpperBound.size() >= 3) &&
-         "expected hostDefinedUpperBound is empty or has upper bound for {M, "
-         "N, K}");
+                           IREE::Encoding::MatmulNarrowDim narrowDim) {
   // Handle narrow-N by transposing to reduce to narrow-M. Note: the
   // enumeratedTiles currently only enumerate narrow-M cases.
   if (narrowDim.isN()) {
-    SmallVector<int64_t> newHostDefinedUpperBound(hostDefinedUpperBound);
-    std::swap(newHostDefinedUpperBound[0], newHostDefinedUpperBound[1]);
     narrowDim.dim = IREE::Encoding::MatmulNarrowDim::Dim::M;
-    TileMxNxK tile =
-        chooseMatmulTile(enumeratedTiles, narrowDim, newHostDefinedUpperBound);
+    TileMxNxK tile = chooseMatmulTile(enumeratedTiles, narrowDim);
     std::swap(tile.M, tile.N);
     return tile;
   }
@@ -204,26 +244,7 @@ TileMxNxK chooseMatmulTile(ArrayRef<TileMxNxK> enumeratedTiles,
   SmallVector<RatedTileMxNxK> ratedTiles;
   ratedTiles.reserve(enumeratedTiles.size());
   int64_t bestPaddingPenalty = INT64_MAX;
-  int64_t mUB = INT64_MAX;
-  int64_t nUB = INT64_MAX;
-  int64_t kUB = INT64_MAX;
-  if (!hostDefinedUpperBound.empty()) {
-    mUB = hostDefinedUpperBound[0];
-    nUB = hostDefinedUpperBound[1];
-    kUB = hostDefinedUpperBound[2];
-  }
   for (auto tile : enumeratedTiles) {
-    if (tile.M > mUB || tile.N > nUB || tile.K > kUB) {
-      LLVM_DEBUG(llvm::dbgs() << "[" << DEBUG_TYPE << "]: tile (";
-                 llvm::interleaveComma(
-                     ArrayRef<int64_t>{tile.M, tile.N, tile.K}, llvm::dbgs());
-                 llvm::dbgs()
-                 << ") is skipped because it is not valid for upper_bound (";
-                 llvm::interleaveComma(ArrayRef<int64_t>{mUB, nUB, kUB},
-                                       llvm::dbgs());
-                 llvm::dbgs() << ")\n");
-      continue;
-    }
     RatedTileMxNxK ratedTile(tile);
     ratedTile.paddingPenalty = 0;
     // If we are choosing a tile for a narrow-M case, we want to minimize
@@ -240,9 +261,9 @@ TileMxNxK chooseMatmulTile(ArrayRef<TileMxNxK> enumeratedTiles,
     }
     ratedTile.productMxNxK = tile.M * tile.N * tile.K;
     ratedTiles.push_back(ratedTile);
-    LLVM_DEBUG(llvm::dbgs() << "candidate: "; llvm::interleaveComma(
-                   ArrayRef<int64_t>{tile.M, tile.N, tile.K}, llvm::dbgs());
-               llvm::dbgs() << " penalty:" << ratedTile.paddingPenalty << "\n");
+    LDBG() << "candidate: "
+           << llvm::interleaved(ArrayRef{tile.M, tile.N, tile.K})
+           << " penalty:" << ratedTile.paddingPenalty;
     bestPaddingPenalty = std::min(bestPaddingPenalty, ratedTile.paddingPenalty);
   }
   RatedTileMxNxK bestRatedTile;
@@ -257,18 +278,16 @@ TileMxNxK chooseMatmulTile(ArrayRef<TileMxNxK> enumeratedTiles,
   // Sanity check. This assert can only fail if there's a programming mistake
   // locally here.
   assert(bestRatedTile.paddingPenalty == bestPaddingPenalty);
-  LLVM_DEBUG(
-      llvm::dbgs() << "bestRatedTile: "; llvm::interleaveComma(
-          ArrayRef<int64_t>{bestRatedTile.M, bestRatedTile.N, bestRatedTile.K},
-          llvm::dbgs());
-      llvm::dbgs() << " penalty:" << bestRatedTile.paddingPenalty << "\n");
+  LDBG() << "bestRatedTile: "
+         << llvm::interleaved(
+                ArrayRef{bestRatedTile.M, bestRatedTile.N, bestRatedTile.K})
+         << " penalty:" << bestRatedTile.paddingPenalty;
   return bestRatedTile;
 }
 
-FailureOr<Operation *>
-lowerContractionOpWithEncoding(OpBuilder &builder, linalg::LinalgOp linalgOp,
-                               ValueRange operands,
-                               IREE::Codegen::LayoutAttrInterface layoutAttr) {
+FailureOr<Operation *> lowerContractionOpWithEncoding(
+    OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
+    IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
   if (!linalgOp.hasPureTensorSemantics()) {
     return failure();
   }
@@ -293,8 +312,12 @@ lowerContractionOpWithEncoding(OpBuilder &builder, linalg::LinalgOp linalgOp,
     return failure();
   }
 
-  MaterializeEncodingInfo encodingInfo = layoutAttr.getEncodingInfo(
-      cast<RankedTensorType>(linalgOp->getResultTypes()[0]));
+  MaterializeEncodingInfo encodingInfo = {};
+  if (auto packedLayoutAttr =
+          dyn_cast<IREE::Codegen::PackedLayoutMaterializerAttr>(layoutAttr)) {
+    encodingInfo = packedLayoutAttr.getEncodingInfo(
+        cast<RankedTensorType>(linalgOp->getResultTypes()[0]));
+  }
 
   if (isIdentityLayout(encodingInfo)) {
     return dropEncodingAndCloneOp(builder, linalgOp,
@@ -334,7 +357,7 @@ lowerContractionOpWithEncoding(OpBuilder &builder, linalg::LinalgOp linalgOp,
 }
 
 //===----------------------------------------------------------------------===//
-// Interface methods implementaion for iree_cpu.cpu_encoding_layout.
+// Interface methods implementaion for iree_cpu.cpu_encoding_resolver.
 //===----------------------------------------------------------------------===//
 
 // Enumerate tile sizes to choose from on riscv32.
@@ -353,17 +376,77 @@ enumerateMatmulTileRiscv32(DictionaryAttr config) {
   // Fallback - no architecture-optimized tile size for this case.
   return {};
 }
+// RISC-V has vector register length extensions: zvl128b, zvl256b etc.
+// If these extension are specified in target cpu feature,
+// they can be used to determine VLEN. This function assumes that
+// 'v' feature is present
+size_t getRISCVVVlenFromCPUFeatures(DictionaryAttr config) {
+  // If +zvl* feature is not explicitly specified,
+  // fallback to +zvl128b, as spec specifies minimum VLEN
+  // of 128b for the V extension: https://rb.gy/p8rbzv
+  size_t vlen;
+  if (hasFeature(config, "+zvl65536b")) {
+    vlen = 65536;
+  } else if (hasFeature(config, "+zvl32768b")) {
+    vlen = 32768;
+  } else if (hasFeature(config, "+zvl16384b")) {
+    vlen = 16384;
+  } else if (hasFeature(config, "+zvl8192b")) {
+    vlen = 8192;
+  } else if (hasFeature(config, "+zvl4096b")) {
+    vlen = 4096;
+  } else if (hasFeature(config, "+zvl2048b")) {
+    vlen = 2048;
+  } else if (hasFeature(config, "+zvl1024b")) {
+    vlen = 1024;
+  } else if (hasFeature(config, "+zvl512b")) {
+    vlen = 512;
+  } else if (hasFeature(config, "+zvl256b")) {
+    vlen = 256;
+  } else {
+    vlen = 128;
+  }
+  return vlen;
+}
+// Enumerate tile sizes to choose from on riscv64.
+// For narrow-{M,N} cases, this only enumerates on narrow M. The narrow-N cases
+// are handled by transposition in chooseMatmulTile.
+static SmallVector<TileMxNxK>
+enumerateMatmulTileRiscv64(TypeRange elementTypes, DictionaryAttr config) {
+
+  // Data-Tiling is only implemented for the V extension
+  if (!hasFeature(config, "+v")) {
+    return {};
+  }
+  size_t vlen = getRISCVVVlenFromCPUFeatures(config);
+  assert(elementTypes.size() == 3);
+  Type lhs = elementTypes[0];
+  Type rhs = elementTypes[1];
+  Type out = elementTypes[2];
+  if (lhs.isF32() && rhs.isF32() && out.isF32()) {
+    // VLEN-aware Tile size selection
+    // One concern that needs to be addressed here is that
+    // for larger VLENs tile sizes would be very large
+    // leading to a very high padding overhead
+    int N0 = vlen / 8;
+    return {
+        TileMxNxK{7, N0, 1}, // Aim to use vfmacc, 100% register utilization.
+        TileMxNxK{4, N0, 1}, // Truncation of the above.
+        TileMxNxK{2, N0, 1}, // Truncation of the above.
+        TileMxNxK{1, N0, 1}, // Truncation of the above.
+    };
+  }
+  // Fallback - no architecture-optimized tile size for this case.
+  return {};
+}
 
 // Enumerate tile sizes to choose from on arm64.
 // For narrow-{M,N} cases, this only enumerates on narrow M. The narrow-N cases
 // are handled by transposition in chooseMatmulTile.
 static SmallVector<TileMxNxK> enumerateMatmulTileArm64(TypeRange elementTypes,
                                                        DictionaryAttr config) {
-  // Data-tiling for SVE is not implemented yet.
-  if (hasFeature(config, "+sve") || hasFeature(config, "+sve2")) {
-    return {};
-  }
-
+  // For SVE and scalable vectors, this methods selects base sizes that match
+  // the NEON fixed-width sizes.
   assert(elementTypes.size() == 3);
   Type lhs = elementTypes[0];
   Type rhs = elementTypes[1];
@@ -395,7 +478,6 @@ static SmallVector<TileMxNxK> enumerateMatmulTileArm64(TypeRange elementTypes,
       };
     }
   }
-
   if (lhs.isSignlessInteger(8) && rhs.isSignlessInteger(8) &&
       out.isSignlessInteger(32)) {
     if (hasFeature(config, "+i8mm")) {
@@ -415,7 +497,6 @@ static SmallVector<TileMxNxK> enumerateMatmulTileArm64(TypeRange elementTypes,
       };
     }
   }
-
   if (lhs.isSignlessInteger(8) && rhs.isSignlessInteger(4) &&
       out.isSignlessInteger(32)) {
     if (hasFeature(config, "+i8mm")) {
@@ -439,7 +520,6 @@ static SmallVector<TileMxNxK> enumerateMatmulTileArm64(TypeRange elementTypes,
         TileMxNxK{1, 16, 2},
     };
   }
-
   // Fallback - no architecture-optimized tile size for this case.
   return {};
 }
@@ -572,20 +652,23 @@ enumerateCPUMatmulTiles(IREE::Encoding::EncodingAttr encoding,
   if (isRISCV32(config)) {
     return enumerateMatmulTileRiscv32(config);
   }
+  if (isRISCV64(config)) {
+    return enumerateMatmulTileRiscv64(elementTypes, config);
+  }
   return {};
 }
 
-struct CPUDeviceEncodingLayoutResolverAttrInterface
-    : public DeviceEncodingLayoutResolverExternalModelBase<
-          CPUDeviceEncodingLayoutResolverAttrInterface, CPUEncodingLayoutAttr> {
+struct CPUEncodingPackedLayoutMaterializerAttr
+    : public PackedLayoutMaterializerAttrExternalModelBase<
+          CPUEncodingPackedLayoutMaterializerAttr, CPUEncodingResolverAttr> {
 
   DictionaryAttr getConfiguration(Attribute attr) const {
-    return cast<CPUEncodingLayoutAttr>(attr).getConfiguration();
+    return cast<CPUEncodingResolverAttr>(attr).getConfiguration();
   }
 
   MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
                                               RankedTensorType type) const {
-    auto layoutAttr = cast<CPUEncodingLayoutAttr>(attr);
+    auto layoutAttr = cast<CPUEncodingResolverAttr>(attr);
 
     auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
         type.getEncoding());
@@ -607,27 +690,37 @@ struct CPUDeviceEncodingLayoutResolverAttrInterface
     if (enumeratedTileMxNxK.empty()) {
       return info;
     }
-    auto narrowDim = IREE::Encoding::getMatmulNarrowDim(encoding);
+    auto narrowDim = IREE::Encoding::getPo2MatmulNarrowDim(encoding);
     // Choose a final matmul TileMxNxK from the above-enumarated tile shapes,
     // taking narrow dimensions into account.
-    TileMxNxK chosenTileMxNxK = chooseMatmulTile(
-        enumeratedTileMxNxK, narrowDim, encoding.getRoundDimsToArray());
+    TileMxNxK chosenTileMxNxK =
+        chooseMatmulTile(enumeratedTileMxNxK, narrowDim);
     FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
         getEncodingInfoForMatmul(encoding, chosenTileMxNxK);
     if (failed(maybeEncodingInfo)) {
       return info;
     }
     info = std::move(maybeEncodingInfo.value());
-    if (Encoding::isNarrowNResult(encoding)) {
+    if (IREE::Encoding::isNarrowNResult(encoding)) {
       transposeInPlace(info);
+    }
+    FailureOr<IREE::Codegen::ScalableTileFlags> scalableFlags =
+        getScalableTileFlags(*cDims, encoding, layoutAttr.getConfiguration());
+    if (succeeded(scalableFlags)) {
+      info.scalableTiles = std::move(scalableFlags);
     }
     return info;
   }
+};
+
+struct CPUEncodingResolverMaterializerAttr final
+    : public EncodingLayoutMaterializerAttrExternalModelBase<
+          CPUEncodingResolverMaterializerAttr, CPUEncodingResolverAttr> {
 
   Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
                      TypeRange convertedResTypes,
                      ValueRange convertedOperands) const {
-    auto layoutAttr = cast<CPUEncodingLayoutAttr>(attr);
+    auto layoutAttr = cast<CPUEncodingResolverAttr>(attr);
     auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
     if (!linalgOp) {
       return nullptr;
@@ -635,45 +728,49 @@ struct CPUDeviceEncodingLayoutResolverAttrInterface
 
     FailureOr<Operation *> newOp = lowerContractionOpWithEncoding(
         b, linalgOp, convertedOperands,
-        cast<IREE::Codegen::LayoutAttrInterface>(layoutAttr));
+        cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
     return newOp.value_or(nullptr);
   }
 };
 
-struct CPUHostEncodingLayoutResolverAttrInterface final
-    : IREE::Encoding::EncodingLayoutResolverAttrInterface::ExternalModel<
-          CPUHostEncodingLayoutResolverAttrInterface, CPUEncodingLayoutAttr> {
+struct CPULayoutResolverAttr final
+    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+          CPULayoutResolverAttr, CPUEncodingResolverAttr> {
   Attribute cloneWithSimplifiedConfig(Attribute attr,
                                       DictionaryAttr config) const {
     MLIRContext *ctx = attr.getContext();
     SmallVector<NamedAttribute> configItems;
-    storeNamedAttrIfPresent(configItems, config, "cpu_features");
-    storeNamedAttrIfPresent(configItems, config, "target_triple");
+    if (std::optional<StringRef> cpuFeatures = getConfigCpuFeatures(config)) {
+      addConfigCpuFeatures(ctx, cpuFeatures.value(), configItems);
+    }
+    if (std::optional<StringRef> targetTriple = getConfigTargetTriple(config)) {
+      addConfigTargetTriple(ctx, targetTriple.value(), configItems);
+    }
     storeNamedAttrIfPresent(configItems, config, "ukernels");
-    return CPUEncodingLayoutAttr::get(ctx,
-                                      DictionaryAttr::get(ctx, configItems));
+    return CPUEncodingResolverAttr::get(ctx,
+                                        DictionaryAttr::get(ctx, configItems));
   }
 
   Attribute getLayout(Attribute attr, RankedTensorType type) const {
     MLIRContext *ctx = attr.getContext();
-    return CPUEncodingLayoutAttr::get(ctx, getLayoutImpl(attr, type));
+    return CPUEncodingResolverAttr::get(ctx, getPackedLayoutImpl(attr, type));
   }
 };
 
-struct CPUHostSerializableEncodingAttrInterface final
-    : IREE::Encoding::SerializableEncodingAttrInterface::ExternalModel<
-          CPUHostSerializableEncodingAttrInterface, CPUEncodingLayoutAttr> {
+struct CPUSerializableAttr final
+    : IREE::Encoding::SerializableAttr::ExternalModel<CPUSerializableAttr,
+                                                      CPUEncodingResolverAttr> {
 
   Value calculateStorageSizeInBytes(Attribute attr, Location loc,
                                     OpBuilder &builder, RankedTensorType type,
                                     ValueRange dynamicDims) const {
-    return calculateStorageSizeInBytesImpl(attr, loc, builder, type,
-                                           dynamicDims);
+    return calculatePackedStorageSizeInBytesImpl(attr, loc, builder, type,
+                                                 dynamicDims);
   }
 };
 
 //===----------------------------------------------------------------------===//
-// Interface methods implementaion for iree_cpu.vmvx_encoding_layout.
+// Interface methods implementaion for iree_cpu.vmvx_encoding_resolver.
 //===----------------------------------------------------------------------===//
 
 // Enumerate tile sizes to choose from when no specific architecture is
@@ -689,7 +786,7 @@ enumerateVMVXMatmulTiles(linalg::ContractionDimensions cDims,
   // codegen.query_tile_sizes op, so we disable dynamic tile shapes for
   // batch_matmul. Also, they are not set up for narrow M/N matmul, so it is
   // disabled when it is the case.
-  if (!cDims.batch.empty() || getMatmulNarrowDim(encoding)) {
+  if (!cDims.batch.empty() || getPo2MatmulNarrowDim(encoding)) {
     hasUkernelSupport = false;
   }
   if (hasUkernelSupport) {
@@ -706,18 +803,17 @@ enumerateVMVXMatmulTiles(linalg::ContractionDimensions cDims,
   };
 }
 
-struct VMVXDeviceEncodingLayoutResolverAttrInterface final
-    : DeviceEncodingLayoutResolverExternalModelBase<
-          VMVXDeviceEncodingLayoutResolverAttrInterface,
-          VMVXEncodingLayoutAttr> {
+struct VMVXEncodingPackedLayoutMaterializerAttr final
+    : PackedLayoutMaterializerAttrExternalModelBase<
+          VMVXEncodingPackedLayoutMaterializerAttr, VMVXEncodingResolverAttr> {
 
   DictionaryAttr getConfiguration(Attribute attr) const {
-    return cast<VMVXEncodingLayoutAttr>(attr).getConfiguration();
+    return cast<VMVXEncodingResolverAttr>(attr).getConfiguration();
   }
 
   MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
                                               RankedTensorType type) const {
-    auto layoutAttr = cast<VMVXEncodingLayoutAttr>(attr);
+    auto layoutAttr = cast<VMVXEncodingResolverAttr>(attr);
 
     auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
         type.getEncoding());
@@ -739,27 +835,32 @@ struct VMVXDeviceEncodingLayoutResolverAttrInterface final
     if (enumeratedTileMxNxK.empty()) {
       return info;
     }
-    auto narrowDim = IREE::Encoding::getMatmulNarrowDim(encoding);
+    auto narrowDim = IREE::Encoding::getPo2MatmulNarrowDim(encoding);
     // Choose a final matmul TileMxNxK from the above-enumarated tile shapes,
     // taking narrow dimensions into account.
-    TileMxNxK chosenTileMxNxK = chooseMatmulTile(
-        enumeratedTileMxNxK, narrowDim, encoding.getRoundDimsToArray());
+    TileMxNxK chosenTileMxNxK =
+        chooseMatmulTile(enumeratedTileMxNxK, narrowDim);
     FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
         getEncodingInfoForMatmul(encoding, chosenTileMxNxK);
     if (failed(maybeEncodingInfo)) {
       return info;
     }
     info = std::move(maybeEncodingInfo.value());
-    if (Encoding::isNarrowNResult(encoding)) {
+    if (IREE::Encoding::isNarrowNResult(encoding)) {
       transposeInPlace(info);
     }
     return info;
   }
+};
+
+struct VMVXEncodingResolverMaterializerAttr final
+    : EncodingLayoutMaterializerAttrExternalModelBase<
+          VMVXEncodingResolverMaterializerAttr, VMVXEncodingResolverAttr> {
 
   Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
                      TypeRange convertedResTypes,
                      ValueRange convertedOperands) const {
-    auto layoutAttr = cast<VMVXEncodingLayoutAttr>(attr);
+    auto layoutAttr = cast<VMVXEncodingResolverAttr>(attr);
     auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
     if (!linalgOp) {
       return nullptr;
@@ -767,37 +868,143 @@ struct VMVXDeviceEncodingLayoutResolverAttrInterface final
 
     FailureOr<Operation *> newOp = lowerContractionOpWithEncoding(
         b, linalgOp, convertedOperands,
-        cast<IREE::Codegen::LayoutAttrInterface>(layoutAttr));
+        cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
     return newOp.value_or(nullptr);
   }
 };
 
-struct VMVXHostEncodingLayoutResolverAttrInterface final
-    : IREE::Encoding::EncodingLayoutResolverAttrInterface::ExternalModel<
-          VMVXHostEncodingLayoutResolverAttrInterface, VMVXEncodingLayoutAttr> {
+struct VMVXLayoutResolverAttr final
+    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+          VMVXLayoutResolverAttr, VMVXEncodingResolverAttr> {
   Attribute cloneWithSimplifiedConfig(Attribute attr,
                                       DictionaryAttr config) const {
     MLIRContext *ctx = attr.getContext();
     SmallVector<NamedAttribute> configItems;
     storeNamedAttrIfPresent(configItems, config, "ukernels");
-    return VMVXEncodingLayoutAttr::get(ctx,
-                                       DictionaryAttr::get(ctx, configItems));
+    return VMVXEncodingResolverAttr::get(ctx,
+                                         DictionaryAttr::get(ctx, configItems));
   }
 
   Attribute getLayout(Attribute attr, RankedTensorType type) const {
     MLIRContext *ctx = attr.getContext();
-    return VMVXEncodingLayoutAttr::get(ctx, getLayoutImpl(attr, type));
+    return VMVXEncodingResolverAttr::get(
+        ctx, getPackedLayoutImpl(attr, type, /*addEncodingAttr=*/true));
   }
 };
 
-struct VMVXHostSerializableEncodingAttrInterface final
-    : IREE::Encoding::SerializableEncodingAttrInterface::ExternalModel<
-          VMVXHostSerializableEncodingAttrInterface, VMVXEncodingLayoutAttr> {
+struct VMVXSerializableAttr final
+    : IREE::Encoding::SerializableAttr::ExternalModel<
+          VMVXSerializableAttr, VMVXEncodingResolverAttr> {
   Value calculateStorageSizeInBytes(Attribute attr, Location loc,
                                     OpBuilder &builder, RankedTensorType type,
                                     ValueRange dynamicDims) const {
-    return calculateStorageSizeInBytesImpl(attr, loc, builder, type,
-                                           dynamicDims);
+    return calculatePackedStorageSizeInBytesImpl(attr, loc, builder, type,
+                                                 dynamicDims);
+  }
+};
+
+// Interface for Exsleratev2
+struct Exsleratev2EncodingPackedLayoutMaterializerAttr
+    : public PackedLayoutMaterializerAttrExternalModelBase<
+          Exsleratev2EncodingPackedLayoutMaterializerAttr,
+          Exsleratev2EncodingResolverAttr> {
+  DictionaryAttr getConfiguration(Attribute attr) const {
+    return cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
+  }
+
+  MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
+                                              RankedTensorType type) const {
+    auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
+
+    auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
+        type.getEncoding());
+
+    MaterializeEncodingInfo info;
+    if (!encoding) {
+      return info;
+    }
+
+    // We only know about contractions with {Batch, M, N, K} <= 1 at the moment.
+    auto cDims = getEncodingContractionDims(encoding);
+    if (failed(cDims) || cDims->batch.size() > 1 || cDims->m.size() > 1 ||
+        cDims->n.size() > 1 || cDims->k.size() > 1) {
+      return info;
+    }
+
+    SmallVector<TileMxNxK> enumeratedTileMxNxK =
+        enumerateCPUMatmulTiles(encoding, layoutAttr.getConfiguration());
+    if (enumeratedTileMxNxK.empty()) {
+      return info;
+    }
+    auto narrowDim = IREE::Encoding::getPo2MatmulNarrowDim(encoding);
+    TileMxNxK chosenTileMxNxK =
+        chooseMatmulTile(enumeratedTileMxNxK, narrowDim);
+    FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
+        getEncodingInfoForMatmul(encoding, chosenTileMxNxK);
+    if (failed(maybeEncodingInfo)) {
+      return info;
+    }
+    info = std::move(maybeEncodingInfo.value());
+    if (IREE::Encoding::isNarrowNResult(encoding)) {
+      transposeInPlace(info);
+    }
+    FailureOr<IREE::Codegen::ScalableTileFlags> scalableFlags =
+        getScalableTileFlags(*cDims, encoding, layoutAttr.getConfiguration());
+    if (succeeded(scalableFlags)) {
+      info.scalableTiles = std::move(scalableFlags);
+    }
+    return info;
+  }
+};
+
+struct Exsleratev2EncodingResolverMaterializerAttr final
+    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+          Exsleratev2EncodingResolverMaterializerAttr,
+          Exsleratev2EncodingResolverAttr> {
+
+  Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
+                     TypeRange convertedResTypes,
+                     ValueRange convertedOperands) const {
+    auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
+    auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
+    if (!linalgOp) {
+      return nullptr;
+    }
+
+    FailureOr<Operation *> newOp = lowerContractionOpWithEncoding(
+        b, linalgOp, convertedOperands,
+        cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
+    return newOp.value_or(nullptr);
+  }
+};
+
+struct Exsleratev2LayoutResolverAttr final
+    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+          Exsleratev2LayoutResolverAttr, Exsleratev2EncodingResolverAttr> {
+  Attribute cloneWithSimplifiedConfig(Attribute attr,
+                                      DictionaryAttr config) const {
+    MLIRContext *ctx = attr.getContext();
+    SmallVector<NamedAttribute> configItems;
+    storeNamedAttrIfPresent(configItems, config, "ukernels");
+    return Exsleratev2EncodingResolverAttr::get(
+        ctx, DictionaryAttr::get(ctx, configItems));
+  }
+
+  Attribute getLayout(Attribute attr, RankedTensorType type) const {
+    MLIRContext *ctx = attr.getContext();
+    return Exsleratev2EncodingResolverAttr::get(
+        ctx, getPackedLayoutImpl(attr, type, /*addEncodingAttr=*/true));
+  }
+};
+
+struct Exsleratev2SerializableAttr final
+    : IREE::Encoding::SerializableAttr::ExternalModel<
+          Exsleratev2SerializableAttr, Exsleratev2EncodingResolverAttr> {
+  Value calculateStorageSizeInBytes(Attribute attr, Location loc,
+                                    OpBuilder &builder, RankedTensorType type,
+                                    ValueRange dynamicDims) const {
+    return calculatePackedStorageSizeInBytesImpl(attr, loc, builder, type,
+                                                 dynamicDims);
   }
 };
 
@@ -806,14 +1013,18 @@ struct VMVXHostSerializableEncodingAttrInterface final
 void registerCPUEncodingExternalModels(DialectRegistry &registry) {
   registry.addExtension(
       +[](MLIRContext *ctx, IREE::CPU::IREECPUDialect *dialect) {
-        IREE::CPU::CPUEncodingLayoutAttr::attachInterface<
-            CPUDeviceEncodingLayoutResolverAttrInterface,
-            CPUHostEncodingLayoutResolverAttrInterface,
-            CPUHostSerializableEncodingAttrInterface>(*ctx);
-        IREE::CPU::VMVXEncodingLayoutAttr::attachInterface<
-            VMVXDeviceEncodingLayoutResolverAttrInterface,
-            VMVXHostEncodingLayoutResolverAttrInterface,
-            VMVXHostSerializableEncodingAttrInterface>(*ctx);
+        IREE::CPU::CPUEncodingResolverAttr::attachInterface<
+            CPUEncodingPackedLayoutMaterializerAttr,
+            CPUEncodingResolverMaterializerAttr, CPULayoutResolverAttr,
+            CPUSerializableAttr>(*ctx);
+        IREE::CPU::VMVXEncodingResolverAttr::attachInterface<
+            VMVXEncodingPackedLayoutMaterializerAttr,
+            VMVXEncodingResolverMaterializerAttr, VMVXLayoutResolverAttr,
+            VMVXSerializableAttr>(*ctx);
+        IREE::CPU::Exsleratev2EncodingResolverAttr::attachInterface<
+            Exsleratev2EncodingPackedLayoutMaterializerAttr,
+            Exsleratev2EncodingResolverMaterializerAttr,
+            Exsleratev2LayoutResolverAttr, Exsleratev2SerializableAttr>(*ctx);
       });
 }
 

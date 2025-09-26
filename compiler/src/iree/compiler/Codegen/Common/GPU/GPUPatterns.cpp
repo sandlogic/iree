@@ -51,7 +51,7 @@ struct FlattenTransferReadOp : public OpRewritePattern<vector::TransferReadOp> {
     auto loc = transferReadOp.getLoc();
     Value vector = transferReadOp.getVector();
     VectorType vectorType = llvm::cast<VectorType>(vector.getType());
-    Value source = transferReadOp.getSource();
+    Value source = transferReadOp.getBase();
     MemRefType sourceType = llvm::dyn_cast<MemRefType>(source.getType());
     // Contiguity check is valid on tensors only.
     if (!sourceType)
@@ -151,7 +151,7 @@ struct FlattenTransferReadOp : public OpRewritePattern<vector::TransferReadOp> {
 // MMA types but MMA load can transpose the matrix when loading.
 struct CombineTransferReadOpBroadcast final
     : public OpRewritePattern<vector::BroadcastOp> {
-  using OpRewritePattern<vector::BroadcastOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(vector::BroadcastOp op,
                                 PatternRewriter &rewriter) const override {
@@ -174,9 +174,9 @@ struct CombineTransferReadOpBroadcast final
     ArrayAttr inBounds = rewriter.getBoolArrayAttr(
         SmallVector<bool>(op.getResultVectorType().getRank(), true));
     rewriter.replaceOpWithNewOp<vector::TransferReadOp>(
-        op, op.getType(), transferReadOp.getSource(),
-        transferReadOp.getIndices(), newMap, transferReadOp.getPadding(),
-        transferReadOp.getMask(), inBounds);
+        op, op.getType(), transferReadOp.getBase(), transferReadOp.getIndices(),
+        newMap, transferReadOp.getPadding(), transferReadOp.getMask(),
+        inBounds);
     return success();
   }
 };

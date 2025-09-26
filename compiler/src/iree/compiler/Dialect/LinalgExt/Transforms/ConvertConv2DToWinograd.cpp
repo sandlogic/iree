@@ -230,10 +230,10 @@ public:
     if (!inputType) {
       return failure();
     }
-    SmallVector<int64_t> inputShape(inputType.getShape());
-    if (llvm::any_of(inputShape, ShapedType::isDynamic)) {
+    if (!inputType.hasStaticShape()) {
       return rewriter.notifyMatchFailure(convOp, "Input shape is not static");
     }
+    SmallVector<int64_t> inputShape(inputType.getShape());
     assert(inputShape.size() == 4);
     if (isNchwFchw) {
       permute<IREE::LinalgExt::Permutation::NCHW_TO_NHWC>(inputShape);
@@ -275,7 +275,7 @@ public:
         winogradInput, loc, rewriter, collapsedShape, reassociations);
 
     // Add BatchMatmulOp
-    SmallVector<int64_t> bmmShape(collapsedShape.begin(), collapsedShape.end());
+    SmallVector<int64_t> bmmShape(collapsedShape);
     SmallVector<int64_t> outputShape(outputType.getShape());
     if (isNchwFchw) {
       permute<IREE::LinalgExt::Permutation::NCHW_TO_NHWC>(outputShape);

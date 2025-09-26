@@ -16,8 +16,9 @@ iree_lit_test_suite(
   SRCS
     "config_ukernel_argmax_gfx908.mlir"
     "config_ukernel_argmax_gfx942.mlir"
-    "config_ukernel_multi_mma_gfx942.mlir"
+    "config_ukernel_data_tiled_mma_gfx942.mlir"
     "default_tuning_specs_amdgpu.mlir"
+    "enable_tensor_ukernels.mlir"
     "gpu_encoding_attrs.mlir"
     "lowering_strategy_from_tuning_spec.mlir"
     "ukernel_pipeline_transform.mlir"
@@ -42,6 +43,7 @@ iree_lit_test_suite(
   SRCS
     "external_function_validation.mlir"
     "smoketest.mlir"
+    "smoketest_hsaco.mlir"
     "target_device_features.mlir"
   TOOLS
     FileCheck

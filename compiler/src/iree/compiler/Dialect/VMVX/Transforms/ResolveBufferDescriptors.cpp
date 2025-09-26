@@ -6,6 +6,7 @@
 
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/VMVX/IR/VMVXDialect.h"
+#include "iree/compiler/Dialect/VMVX/IR/VMVXOps.h"
 #include "iree/compiler/Dialect/VMVX/Transforms/Passes.h"
 #include "iree/compiler/Utils/IntegerSet.h"
 #include "llvm/Support/Debug.h"
@@ -225,7 +226,7 @@ replaceOffsetSizesAndStridesWith(RewriterBase &rewriter,
 namespace {
 
 struct FromMemRefSubView : public OpRewritePattern<GetBufferDescriptorOp> {
-  using OpRewritePattern<GetBufferDescriptorOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(GetBufferDescriptorOp op,
                                 PatternRewriter &rewriter) const override {
     auto subview = op.getSource().template getDefiningOp<memref::SubViewOp>();
@@ -290,7 +291,7 @@ struct FromMemRefSubView : public OpRewritePattern<GetBufferDescriptorOp> {
 
 struct FromHalInterfaceBindingSubspan
     : public OpRewritePattern<GetBufferDescriptorOp> {
-  using OpRewritePattern<GetBufferDescriptorOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(GetBufferDescriptorOp op,
                                 PatternRewriter &rewriter) const override {
     auto binding =
@@ -335,10 +336,51 @@ getBaseBufferReplacementForDescriptor(GetBufferDescriptorOp descriptorOp,
       .getResult(0);
 }
 
+struct FromMemRefAssumeAlignment
+    : public OpRewritePattern<GetBufferDescriptorOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(GetBufferDescriptorOp op,
+                                PatternRewriter &rewriter) const override {
+    auto assumeOp = op.getSource().getDefiningOp<memref::AssumeAlignmentOp>();
+    if (!assumeOp) {
+      return failure();
+    }
+    auto binding = assumeOp.getMemref()
+                       .getDefiningOp<IREE::HAL::InterfaceBindingSubspanOp>();
+    if (!binding) {
+      return failure();
+    }
+
+    Location loc = op.getLoc();
+    // TODO(hanchung): Refactor resolverBufferDescriptor* out, so we don't have
+    // to track the SSA chain above.
+    FailureOr<DescriptorInfo> resultDescriptor =
+        resolveBufferDescriptorForInterfaceBinding(binding, rewriter, loc);
+    if (failed(resultDescriptor)) {
+      return rewriter.notifyMatchFailure(
+          op, "failed to resolve descriptor with source being binding op");
+    }
+
+    replaceOffsetSizesAndStridesWith(rewriter, op, resultDescriptor.value());
+
+    // Base buffer.
+    rewriter.replaceAllUsesWith(
+        op.getBaseBuffer(),
+        rewriter
+            .create<IREE::VMVX::GetRawInterfaceBindingBufferOp>(
+                loc, op.getBaseBuffer().getType(), binding.getLayout(),
+                binding.getBindingAttr())
+            .getResult());
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // Allocations always return a non-offset memref and are matched by this
 // pattern.
 struct FromAllocation : public OpRewritePattern<GetBufferDescriptorOp> {
-  using OpRewritePattern<GetBufferDescriptorOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(GetBufferDescriptorOp op,
                                 PatternRewriter &rewriter) const override {
     auto alloca = op.getSource().template getDefiningOp<memref::AllocaOp>();
@@ -372,7 +414,7 @@ struct FromAllocation : public OpRewritePattern<GetBufferDescriptorOp> {
 // MemRef globals are always static shaped and reference a non-offset
 // buffer.
 struct FromGlobal : public OpRewritePattern<GetBufferDescriptorOp> {
-  using OpRewritePattern<GetBufferDescriptorOp>::OpRewritePattern;
+  using OpRewritePattern::OpRewritePattern;
   LogicalResult matchAndRewrite(GetBufferDescriptorOp op,
                                 PatternRewriter &rewriter) const override {
     auto global = op.getSource().template getDefiningOp<memref::GetGlobalOp>();
@@ -420,7 +462,8 @@ public:
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
     patterns.insert<FromAllocation, FromGlobal, FromHalInterfaceBindingSubspan,
-                    FromMemRefSubView>(&getContext());
+                    FromMemRefSubView, FromMemRefAssumeAlignment>(
+        &getContext());
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();

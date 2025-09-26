@@ -4,24 +4,17 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "iree/compiler/Codegen/Common/FastMathPatterns.h"
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/Transforms/Approximation.h"
 #include "mlir/Dialect/Math/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 namespace mlir::iree_compiler {
-
-/// Deprecated! This flag had buggy/unintentional semantics.
-/// Its original comment said:
-/// ""use native hardware operations instead of polynomial approximation".
-static llvm::cl::opt<bool> clNativeMathPrecision(
-    "iree-codegen-gpu-native-math-precision",
-    llvm::cl::desc("Deprecated! This flag had buggy/unintentional semantics. "
-                   "Its original description said: \"Skip polynomial lowering "
-                   "for math op natively available on GPU.\""),
-    llvm::cl::init(false));
 
 #define GEN_PASS_DEF_MATHTRANSFORMPASS
 #include "iree/compiler/Codegen/Common/Passes.h.inc"
@@ -71,12 +64,6 @@ static bool predicateRewrite(StringRef name,
     // implementation like math.powf.
     return true;
   }
-  if (clNativeMathPrecision) { // Legacy.
-    if (name == math::Exp2Op::getOperationName() ||
-        name == math::RoundEvenOp::getOperationName()) {
-      return false;
-    }
-  }
   if (isROCMBackend(target)) {
     // On ROCm, we do not need most rewrites as we can generally bottom out on
     // either device library functions, or handling of intrinsics in AMDGPU.
@@ -94,10 +81,7 @@ static bool predicateRewrite(StringRef name,
 
 static bool predicateF32Cast(StringRef name,
                              IREE::HAL::ExecutableTargetAttr target) {
-  (void)target;                // Currently unused.
-  if (clNativeMathPrecision) { // Legacy.
-    return false;
-  }
+  (void)target; // Currently unused.
   StringRef atan = math::AtanOp::getOperationName();
   StringRef atan2 = math::Atan2Op::getOperationName();
   StringRef cos = math::CosOp::getOperationName();
@@ -117,16 +101,6 @@ static bool predicateF32Cast(StringRef name,
 
 static bool predicateApprox(StringRef name,
                             IREE::HAL::ExecutableTargetAttr target) {
-  if (clNativeMathPrecision) { // Legacy.
-    if (name == math::ErfOp::getOperationName()) {
-      // The legacy implementation had a bug: it always applied polynomial
-      // approximation of math.erf, even when clNativeMathPrecision was passed.
-      // We actually have CI tests that rely on that bug: they pass
-      // clNativeMathPrecision but fail unless math.erf is approximated.
-      return true;
-    }
-    return false;
-  }
   if (isROCMBackend(target)) {
     // On ROCm, we do not need most rewrites as we can generally bottom out on
     // either device library functions, or handling of intrinsics in AMDGPU.
@@ -138,11 +112,17 @@ static bool predicateApprox(StringRef name,
     // something that we can really prevent. Avoiding this rewrite helps a bit.
     return false;
   }
+
+  // Compute hasFastExp from target attribute.
+  bool hasFastExp = isROCMBackend(target);
+
+  // Continue with the existing list for standard approximations.
   StringRef acos = math::AcosOp::getOperationName();
   StringRef asin = math::AsinOp::getOperationName();
   StringRef atan = math::AtanOp::getOperationName();
   StringRef atan2 = math::Atan2Op::getOperationName();
   StringRef cos = math::CosOp::getOperationName();
+  StringRef erf = math::ErfOp::getOperationName();
   StringRef sin = math::SinOp::getOperationName();
   StringRef tanh = math::TanhOp::getOperationName();
   StringRef log = math::LogOp::getOperationName();
@@ -151,23 +131,38 @@ static bool predicateApprox(StringRef name,
   StringRef exp = math::ExpOp::getOperationName();
   StringRef expm1 = math::ExpM1Op::getOperationName();
   StringRef cbrt = math::CbrtOp::getOperationName();
-  StringRef erf = math::ErfOp::getOperationName();
+
+  // List of ops that have specific device library implementations enabled by
+  // hasFastExp.
+  StringRef opsWithDeviceLibImpl[] = {erf};
+
+  // If hasFastExp is enabled and the op is in our device-lib list,
+  // don't apply the standard polynomial approximation.
+  if (hasFastExp && llvm::is_contained(opsWithDeviceLibImpl, name)) {
+    return false;
+  }
+
   return llvm::is_contained({atan, atan2, tanh, log, log2, log1p, erf, asin,
                              acos, exp, expm1, cbrt, sin, cos},
                             name);
 }
 
-namespace {
+// Returns true if the given function should be handled by a fast math pattern.
+static bool predicateDeviceLibImpl(StringRef name,
+                                   IREE::HAL::ExecutableTargetAttr target) {
+  // Compute hasFastExp from target attribute.
+  bool hasFastExp = isROCMBackend(target);
 
-struct DeprecationWarningForNativeMathPrecision {
-  DeprecationWarningForNativeMathPrecision() {
-    if (clNativeMathPrecision) {
-      clNativeMathPrecision.error(
-          "This option is deprecated. The MathTransformPass should do the "
-          "right things for each target.");
-    }
-  }
-};
+  // If fast exp is not available, don't use device-lib implementations.
+  if (!hasFastExp)
+    return false;
+
+  // Only apply to erf for now.
+  StringRef erf = math::ErfOp::getOperationName();
+  return llvm::is_contained({erf}, name);
+}
+
+namespace {
 
 class MathTransformPass final
     : public impl::MathTransformPassBase<MathTransformPass> {
@@ -175,8 +170,6 @@ public:
   using Base::Base;
 
   void runOnOperation() override {
-    static DeprecationWarningForNativeMathPrecision warning;
-
     RewritePatternSet patterns(&getContext());
     auto target = IREE::HAL::ExecutableTargetAttr::lookup(getOperation());
     if (!target) {
@@ -193,6 +186,10 @@ public:
     populateMathPolynomialApproximationPatterns(
         patterns,
         [target](StringRef name) { return predicateApprox(name, target); });
+
+    populateFastMathPatterns(patterns, [target](StringRef name) {
+      return predicateDeviceLibImpl(name, target);
+    });
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       return signalPassFailure();

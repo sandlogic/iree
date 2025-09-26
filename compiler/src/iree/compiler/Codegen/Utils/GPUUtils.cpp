@@ -14,8 +14,9 @@
 #include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Debug.h"
+#include "llvm/Support/DebugLog.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/InterleavedRange.h"
 #include "mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -32,9 +33,10 @@
 #define DEBUG_TYPE "iree-codegen-gpu-utils"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define DBGSNL() (llvm::dbgs() << "\n")
-#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
-static constexpr unsigned kShuffleBitWidth = 32;
+constexpr unsigned kShuffleBitWidth = 32;
+// TODO: These are AMD GPU specific. These need to find a better home.
+constexpr char kWavesPerEuAttrName[] = "waves_per_eu";
 
 static llvm::cl::opt<std::string> clTestTarget(
     "iree-gpu-test-target",
@@ -425,7 +427,8 @@ Value unpackToVector(Location loc, OpBuilder &builder, Value packedInput,
 /// Emit warp reduction code sequence for a given scalar input value.
 static Value warpReduction(Location loc, OpBuilder &builder, Value input,
                            vector::CombiningKind kind, uint32_t warpSize,
-                           uint32_t numLaneToReduce) {
+                           uint32_t numLaneToReduce,
+                           bool expandSubgroupReduce) {
   assert(llvm::isPowerOf2_32(numLaneToReduce));
   assert((llvm::isa<IntegerType, FloatType>(input.getType())) &&
          "Input must be a scalar");
@@ -437,9 +440,26 @@ static Value warpReduction(Location loc, OpBuilder &builder, Value input,
   const bool needsPacking = kShuffleBitWidth != origBitWidth;
   IntegerType equivIntType = builder.getIntegerType(origBitWidth);
 
-  // Always perform the shuffles over the supported scalar type. For inputs of
-  // smaller bitwidth, perform packing and unpacking via the supported integer
-  // type.
+  // Defer expansion of subgroup reduction until later in pass pipeline to
+  // enable conditional lowering to DPP ops, for potential perf gains over
+  // gpu.shuffle ops.
+  if (!expandSubgroupReduce && numLaneToReduce <= warpSize &&
+      warpSize % numLaneToReduce == 0) {
+    gpu::AllReduceOperation gpuReduceKind = combiningKindToAllReduce(kind);
+
+    // SPIRV currently doesn't have a lowering for clustered reduction,
+    // so if possible avoid adding problematic attribute until it is supported.
+    if (numLaneToReduce == warpSize) {
+      return builder.create<gpu::SubgroupReduceOp>(loc, input, gpuReduceKind,
+                                                   /*uniform=*/false);
+    }
+    return builder.create<gpu::SubgroupReduceOp>(
+        loc, input, gpuReduceKind, /*uniform=*/false, numLaneToReduce);
+  }
+
+  // Otherwise, perform the shuffles over the supported scalar type. For inputs
+  // of smaller bitwidth, perform packing and unpacking via the supported
+  // integer type.
   auto unpack = [loc, &builder, needsPacking, equivIntType,
                  origInputType](Value packedVal) -> Value {
     if (!needsPacking)
@@ -576,20 +596,17 @@ Value emitGPUGroupReduction(Location loc, OpBuilder &builder, Value input,
       size % warpSize == 0 &&
       "Group reduction only support for sizes aligned on warp size for now.");
 
+  // First reduce on a single thread to get per lane reduction value.
+  Value laneVal = builder.create<vector::ReductionOp>(loc, kind, input);
+  laneVal = warpReduction(loc, builder, laneVal, kind, warpSize, warpSize,
+                          expandSubgroupReduce);
+  // Simple case -- emit `gpu.subgroup_reduce` directly.
   if (!expandSubgroupReduce && size == warpSize) {
-    auto gpuReduceKind = combiningKindToAllReduce(kind);
-    // Simple case -- emit `gpu.subgroup_reduce` directly.
-    Value laneVal = builder.create<vector::ReductionOp>(loc, kind, input);
-    return builder.create<gpu::SubgroupReduceOp>(loc, laneVal, gpuReduceKind,
-                                                 /*uniform=*/false);
+    return laneVal;
   }
 
   // More-involved case -- generate `gpu.shuffle` ops over i32 values (using the
   // butterfly shuffle algorithm).
-  //
-  // First reduce on a single thread to get per lane reduction value.
-  Value laneVal = builder.create<vector::ReductionOp>(loc, kind, input);
-  laneVal = warpReduction(loc, builder, laneVal, kind, warpSize, warpSize);
   // if we have more than one warp, reduce across warps.
   if (size > warpSize) {
     uint32_t numWarp = size / warpSize;
@@ -614,7 +631,7 @@ Value emitGPUGroupReduction(Location loc, OpBuilder &builder, Value input,
     SmallVector<Value> indices = {warpId};
     builder.create<scf::IfOp>(loc, lane0, [&](OpBuilder &b, Location l) {
       b.create<memref::StoreOp>(l, laneVal, alloc, indices);
-      b.create<scf::YieldOp>(l, std::nullopt);
+      b.create<scf::YieldOp>(l);
     });
     builder.create<gpu::BarrierOp>(loc);
     // Further reduce the outputs from each warps with a single warp reduce.
@@ -633,7 +650,8 @@ Value emitGPUGroupReduction(Location loc, OpBuilder &builder, Value input,
       loadVal = builder.create<arith::SelectOp>(loc, useIdentityElement,
                                                 identity, loadVal);
     }
-    laneVal = warpReduction(loc, builder, loadVal, kind, warpSize, numWarp);
+    laneVal = warpReduction(loc, builder, loadVal, kind, warpSize, numWarp,
+                            /*expandSubgroupReduce=*/true);
   }
 
   return laneVal;
@@ -773,7 +791,7 @@ std::optional<SmallVector<int64_t>> getMmaNativeVectorSize(Operation *op) {
     else if (sourceType.isF32())
       mmaShapeK = 8;
     else {
-      LDBG("unsupported shape for vector.contract: ");
+      LDBG() << "unsupported shape for vector.contract: ";
       return std::nullopt;
     }
 
@@ -781,10 +799,7 @@ std::optional<SmallVector<int64_t>> getMmaNativeVectorSize(Operation *op) {
     // to 1.
     SmallVector<int64_t> mmaShape(contract.getIteratorTypes().size() - 3, 1);
     mmaShape.append({mmaShapeM, mmaShapeN, mmaShapeK});
-    LLVM_DEBUG({
-      llvm::interleaveComma(mmaShape, DBGS() << "shape for vector.contract: ");
-      llvm::dbgs() << "\n";
-    });
+    LDBG() << "shape for vector.contract: " << llvm::interleaved(mmaShape);
     return mmaShape;
   }
 
@@ -794,11 +809,7 @@ std::optional<SmallVector<int64_t>> getMmaNativeVectorSize(Operation *op) {
       return std::nullopt;
     SmallVector<int64_t> outputShape(writeOp.getVectorType().getRank() - 2, 1);
     outputShape.append({mmaShapeM, mmaShapeN});
-    LLVM_DEBUG({
-      llvm::interleaveComma(outputShape,
-                            DBGS() << "shape for vector.xfer_write: ");
-      llvm::dbgs() << "\n";
-    });
+    LDBG() << "shape for vector.xfer_write: " << llvm::interleaved(outputShape);
     return outputShape;
   }
 
@@ -811,10 +822,7 @@ std::optional<SmallVector<int64_t>> getMmaNativeVectorSize(Operation *op) {
     std::optional<int> operandId =
         getVectorContractOpOperandIdForVectorReadOp(op);
     if (!operandId) {
-      LLVM_DEBUG({
-        DBGS() << "Failed to get operandId for vector::xfer_read: " << *op
-               << "\n";
-      });
+      LDBG() << "Failed to get operandId for vector::xfer_read: " << *op;
       return std::nullopt;
     }
 
@@ -866,22 +874,16 @@ std::optional<SmallVector<int64_t>> getMmaNativeVectorSize(Operation *op) {
       if (*operandId == 2) {
         SmallVector<int64_t> readShape;
         readShape.append({mmaShapeM, mmaShapeN});
-        LLVM_DEBUG({
-          llvm::interleaveComma(readShape,
-                                DBGS() << "shape for vector.xfer_read: ");
-          llvm::dbgs() << "\n";
-        });
+        LDBG() << "shape for vector.xfer_read: "
+               << llvm::interleaved(readShape);
         return readShape;
       }
       // For matrixA.
       if (*operandId == 0) {
         SmallVector<int64_t> readShape;
         readShape.append({mmaShapeM, mmaShapeK});
-        LLVM_DEBUG({
-          llvm::interleaveComma(readShape,
-                                DBGS() << "shape for vector.xfer_read: ");
-          llvm::dbgs() << "\n";
-        });
+        LDBG() << "shape for vector.xfer_read: "
+               << llvm::interleaved(readShape);
         return readShape;
       }
       // For matrixB.
@@ -900,16 +902,13 @@ std::optional<SmallVector<int64_t>> getMmaNativeVectorSize(Operation *op) {
             return std::nullopt;
           sliceType = vecType;
         }
-        LLVM_DEBUG({
-          llvm::interleaveComma(sliceType.getShape(),
-                                DBGS() << "shape for vector.xfer_read: ");
-          llvm::dbgs() << "\n";
-        });
+        LDBG() << "shape for vector.xfer_read: "
+               << llvm::interleaved(sliceType.getShape());
         return llvm::to_vector(sliceType.getShape());
       }
     }
   }
-  LDBG("unsupported shape for " << op->getName().getStringRef());
+  LDBG() << "unsupported shape for " << op->getName().getStringRef();
   return std::nullopt;
 }
 
@@ -929,6 +928,19 @@ bool hasGlobalMemoryAddressSpace(MemRefType memrefType) {
   if (amdgpuAttr && amdgpuAttr.getValue() == amdgpu::AddressSpace::FatRawBuffer)
     return true;
   return llvm::isa<IREE::HAL::DescriptorTypeAttr>(addrSpace);
+}
+
+bool hasAMDGPUFatRawBufferAddressSpace(MemRefType memrefType) {
+  Attribute addrSpace = memrefType.getMemorySpace();
+  if (!addrSpace) {
+    return false;
+  }
+  auto amdgpuAttr = dyn_cast<amdgpu::AddressSpaceAttr>(addrSpace);
+  if (amdgpuAttr &&
+      amdgpuAttr.getValue() == amdgpu::AddressSpace::FatRawBuffer) {
+    return true;
+  }
+  return false;
 }
 
 bool hasSharedMemoryAddressSpace(MemRefType memrefType) {
@@ -986,32 +998,47 @@ IREE::GPU::TargetAttr getCLGPUTarget(MLIRContext *context) {
   return IREE::GPU::getFullTarget(backend, arch, features, context);
 }
 
-IREE::GPU::TargetAttr getGPUTargetAttr(Attribute attr) {
-  if (!attr) {
-    return {};
+IREE::GPU::TargetAttr getGPUTargetAttr(DictionaryAttr attr) {
+  return dyn_cast_or_null<IREE::GPU::TargetAttr>(getConfigTargetInfo(attr));
+}
+
+IREE::GPU::TargetAttr getGPUTargetAttr(MLIRContext *context,
+                                       IREE::HAL::ExecutableTargetAttr target) {
+  IREE::GPU::TargetAttr gpuTargetAttr;
+  if (target) {
+    gpuTargetAttr = getGPUTargetAttr(target.getConfiguration());
   }
-  DictionaryAttr config;
-  auto targetAttr = dyn_cast<IREE::HAL::ExecutableTargetAttr>(attr);
-  if (targetAttr) {
-    config = targetAttr.getConfiguration();
-  } else {
-    config = dyn_cast<DictionaryAttr>(attr);
+  if (!gpuTargetAttr) {
+    gpuTargetAttr = getCLGPUTarget(context);
   }
-  if (!config) {
-    return getCLGPUTarget(attr.getContext());
-  }
-  auto gpuAttr = config.getAs<IREE::GPU::TargetAttr>(kGPUTargetAttrName);
-  if (!gpuAttr) {
-    return getCLGPUTarget(attr.getContext());
-  }
-  return gpuAttr;
+  return gpuTargetAttr;
 }
 
 IREE::GPU::TargetAttr getGPUTargetAttr(Operation *op) {
-  if (auto target = IREE::HAL::ExecutableTargetAttr::lookup(op)) {
-    return getGPUTargetAttr(target);
+  return getGPUTargetAttr(op->getContext(),
+                          IREE::HAL::ExecutableTargetAttr::lookup(op));
+}
+void addConfigGPUTarget(MLIRContext *context,
+                        IREE::GPU::TargetAttr gpuTargetAttr,
+                        SmallVectorImpl<NamedAttribute> &config) {
+  addConfigTargetInfo(context, gpuTargetAttr, config);
+}
+
+IntegerAttr getConfigWavesPerEuAttr(DictionaryAttr targetConfig) {
+  return targetConfig.getAs<IntegerAttr>(kWavesPerEuAttrName);
+}
+std::optional<int64_t> getConfigWavesPerEu(DictionaryAttr targetConfig) {
+  auto attr = getConfigWavesPerEuAttr(targetConfig);
+  if (attr) {
+    return attr.getInt();
   }
-  return getCLGPUTarget(op->getContext());
+  return std::nullopt;
+}
+void addConfigWavesPerEu(MLIRContext *context, int64_t wavesPerEu,
+                         SmallVectorImpl<NamedAttribute> &config) {
+  config.emplace_back(
+      StringAttr::get(context, kWavesPerEuAttrName),
+      IntegerAttr::get(IntegerType::get(context, 64), wavesPerEu));
 }
 
 std::optional<int> getGPUSubgroupSize(mlir::FunctionOpInterface func) {
@@ -1047,6 +1074,18 @@ queryMMAIntrinsics(IREE::HAL::ExecutableVariantOp executableOp) {
         [](IREE::GPU::MMAAttr attr) { return attr.getIntrinsic(); });
   }
   return mmaIntrinsics;
+}
+
+SmallVector<Operation *> getTunerRootOps(mlir::ModuleOp moduleOp) {
+  SmallVector<Operation *> rootOps;
+
+  moduleOp.walk([&](Operation *op) {
+    if (hasRootOpInfo(op)) {
+      rootOps.push_back(op);
+    }
+  });
+
+  return rootOps;
 }
 
 } // namespace mlir::iree_compiler
