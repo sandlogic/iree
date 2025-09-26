@@ -55,6 +55,8 @@ inferScaledContractionDims(ArrayRef<AffineMap> indexingMaps);
 FailureOr<linalg::ConvolutionDimensions>
 inferConvolutionDims(ArrayRef<AffineMap> indexingMaps);
 
+bool isaEXSLTileConvolutionOpInterface(linalg::LinalgOp linalgOp);
+
 // Checks whether `linalgOp` conforms to ScaledContractionOp.
 bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp);
 
