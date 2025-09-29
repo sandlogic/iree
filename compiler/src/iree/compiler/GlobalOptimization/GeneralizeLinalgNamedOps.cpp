@@ -13,7 +13,9 @@
 
 #include "iree/compiler/Dialect/Flow/Transforms/RegionOpUtils.h"
 #include "iree/compiler/GlobalOptimization/Passes.h"
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Pass/Pass.h"
 
@@ -46,6 +48,7 @@ struct GeneralizeLinalgNamedOpsPass
 void GeneralizeLinalgNamedOpsPass::runOnOperation() {
   mlir::FunctionOpInterface funcOp = getOperation();
   SmallVector<linalg::LinalgOp> namedOpCandidates;
+
   funcOp.walk([&](linalg::LinalgOp linalgOp) {
     if (!IREE::Flow::isNonNullAndOutsideDispatch(linalgOp) ||
         isa<linalg::GenericOp>(linalgOp)) {
@@ -80,11 +83,30 @@ void GeneralizeLinalgNamedOpsPass::runOnOperation() {
   IRRewriter rewriter(&getContext());
   for (auto linalgOp : namedOpCandidates) {
     rewriter.setInsertionPoint(linalgOp);
+
+    bool isConv = linalg::isaConvolutionOpInterface(linalgOp);
+    Attribute paddingAttr = nullptr;
+
+    if (isConv) {
+      paddingAttr = linalgOp->getAttr("exsleratev2.padding");
+
+      if (paddingAttr && !dyn_cast<DictionaryAttr>(paddingAttr)) {
+        linalgOp->emitOpError(
+            "expected 'exsleratev2.padding' to be a DictionaryAttr");
+        return signalPassFailure();
+      }
+    }
+
+
     FailureOr<linalg::GenericOp> generalizedOp =
         linalg::generalizeNamedOp(rewriter, linalgOp);
     if (failed(generalizedOp)) {
       linalgOp->emitOpError("failed to generalize operation");
       return signalPassFailure();
+    }
+
+    if (paddingAttr) {
+      generalizedOp.value()->setAttr("exsleratev2.padding", paddingAttr);
     }
   }
 }
