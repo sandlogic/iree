@@ -50,10 +50,13 @@ enum class MatchEXSLTiledConvolutionResult {
   NotLinalgOp,
   WrongNoWeightDims,
   WrongNumOperands,
-  NotAddMul
+  WrongIndexingMap,
+  OutputDimsNotParallel,
+  NonOutputDimNotReduction,
+  NoAddMulOp
 };
 
-}
+} // namespace detail
 
 template <typename T>
 static T getAffineExprOfType(AffineExpr lhs, AffineExpr rhs) {
@@ -447,6 +450,87 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
     return detail::MatchEXSLTiledConvolutionResult::WrongNumOperands;
 
   auto indexingMaps = linalgOp.getIndexingMapsArray();
+  auto iteratortypes = linalgOp.getIteratorTypesArray();
+
+  if (indexingMaps.size() < 3)
+    return detail::MatchEXSLTiledConvolutionResult::WrongIndexingMap;
+
+  bool hasParallel = false;
+  bool hasReduction = false;
+
+  for (auto itertype : iteratortypes) {
+    if (itertype == utils::IteratorType::parallel)
+      hasParallel = true;
+    else if (itertype == utils::IteratorType::reduction)
+      hasReduction = true;
+    if (hasParallel && hasReduction)
+      break;
+  }
+
+  SmallVector<bool> isReductionDim(iteratortypes.size(), false);
+  for (auto [idx, itertype] : llvm::enumerate(iteratortypes)) {
+    isReductionDim[idx] = (itertype == utils::IteratorType::reduction);
+  }
+
+  auto inputMap = indexingMaps[0];
+  int count = 0;
+
+  for (auto expr : inputMap.getResults()) {
+    if (auto addOp = dyn_cast<AffineBinaryOpExpr>(expr)) {
+      if (addOp.getKind() == AffineExprKind::Add) {
+        auto lhs = addOp.getLHS();
+        auto rhs = addOp.getRHS();
+
+        auto lhsdimExpr = dyn_cast<AffineDimExpr>(lhs);
+        auto rhsdimExpr = dyn_cast<AffineDimExpr>(rhs);
+
+        if (lhsdimExpr && rhsdimExpr) {
+          unsigned lhsDim = lhsdimExpr.getPosition();
+          unsigned rhsDim = rhsdimExpr.getPosition();
+
+          if (lhsDim < isReductionDim.size() &&
+              rhsDim < isReductionDim.size()) {
+            bool lhsParallel = !isReductionDim[lhsDim];
+            bool rhsParallel = !isReductionDim[rhsDim];
+            if (lhsParallel != rhsParallel) {
+              count++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (count < 2)
+    return detail::MatchEXSLTiledConvolutionResult::NonOutputDimNotReduction;
+
+  auto hascomplexExpr = [](AffineMap map) {
+    for (auto expr : map.getResults()) {
+      if (isa<AffineBinaryOpExpr>(expr))
+        return true;
+    }
+
+    return false;
+  };
+
+  if (hascomplexExpr(indexingMaps.back())) {
+    return detail::MatchEXSLTiledConvolutionResult::OutputDimsNotParallel;
+  }
+  
+  auto genericOp = dyn_cast<mlir::linalg::GenericOp>(linalgOp.getOperation());
+  Block &body = genericOp.getRegion().front();
+  bool hasmul = false;
+  bool hasadd = false;
+
+  for (auto &op : body.getOperations()) {
+    if (isa<arith::MulFOp>(op))
+      hasmul = true;
+    if (isa<arith::AddFOp>(op))
+      hasadd = true;
+  }
+
+  if (!(hasmul && hasadd))
+    return detail::MatchEXSLTiledConvolutionResult::NoAddMulOp;
 
   if (indexingMaps[1].getResults().size() != 6)
     return detail::MatchEXSLTiledConvolutionResult::WrongNoWeightDims;
