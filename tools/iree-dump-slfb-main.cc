@@ -6,8 +6,8 @@
 #include "iree/schemas/exsleratev2_executable_def_reader.h"
 #include "iree/schemas/exsleratev2_executable_def_verifier.h"
 
-void deserializeFromSLFb(const char *filename) {
-  FILE *fp = fopen(filename, "rb");
+void deserializeFromSLFb(const char* filename) {
+  FILE* fp = fopen(filename, "rb");
   if (!fp) {
     printf("Error opening file for reading\n");
     return;
@@ -17,7 +17,7 @@ void deserializeFromSLFb(const char *filename) {
   size_t size = ftell(fp);
   fseek(fp, 0, SEEK_SET);
 
-  void *buffer = malloc(size);
+  void* buffer = malloc(size);
   if (fread(buffer, 1, size, fp) != size) {
     printf("Error reading file\n");
     fclose(fp);
@@ -41,7 +41,7 @@ void deserializeFromSLFb(const char *filename) {
     size_t count = flatbuffers_string_vec_len(entry_points);
     printf("Found %zu entry points:\n", count);
     for (size_t i = 0; i < count; i++) {
-      const char *name = flatbuffers_string_vec_at(entry_points, i);
+      const char* name = flatbuffers_string_vec_at(entry_points, i);
       printf("  %zu: %s\n", i, name ? name : "(null)");
     }
   }
@@ -164,17 +164,17 @@ void deserializeFromSLFb(const char *filename) {
             continue;
           }
 
-          // flatbuffers_uint32_vec_t data =
-          //     iree_exsleratev2_hal_exsleratev2_Uint32Buffer_data(uint32_buffer);
+          flatbuffers_uint32_vec_t data =
+              iree_exsleratev2_hal_exsleratev2_Uint32Buffer_data(uint32_buffer);
 
-          // printf("    %zu: category=%u\n", j, category);
-          // if (data) {
-          //   printf("    Uint32Buffer (%zu bytes):\n[",
-          //          flatbuffers_uint32_vec_len(data));
-          //   for (size_t i = 0; i < flatbuffers_uint32_vec_len(data); i++) {
-          //     printf("%u ", flatbuffers_uint32_vec_at(data, i));
-          //   }
-          // }
+          printf("    %zu: category=%u\n", j, category);
+          if (data) {
+            printf("    Uint32Buffer (%zu bytes):\n[",
+                   flatbuffers_uint32_vec_len(data));
+            for (size_t i = 0; i < flatbuffers_uint32_vec_len(data); i++) {
+              printf("%u ", flatbuffers_uint32_vec_at(data, i));
+            }
+          }
           printf("]\n");
         }
       }
@@ -184,13 +184,13 @@ void deserializeFromSLFb(const char *filename) {
   free(buffer);
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   if (argc != 2) {
     printf("Usage: %s <path_to_flatbuffer_file>\n", argv[0]);
     return 1;
   }
 
-  const char *filename = argv[1];
+  const char* filename = argv[1];
   deserializeFromSLFb(filename);
 
   return 0;
