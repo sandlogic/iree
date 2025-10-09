@@ -1094,7 +1094,6 @@ struct Exsleratev2LayoutResolverAttr final
                                       DictionaryAttr config) const {
     MLIRContext *ctx = attr.getContext();
     SmallVector<NamedAttribute> configItems;
-    storeNamedAttrIfPresent(configItems, config, "ukernels");
     return Exsleratev2EncodingResolverAttr::get(
         ctx, DictionaryAttr::get(ctx, configItems));
   }
@@ -1109,6 +1108,13 @@ struct Exsleratev2LayoutResolverAttr final
 struct Exsleratev2SerializableAttr final
     : IREE::Encoding::SerializableAttr::ExternalModel<
           Exsleratev2SerializableAttr, Exsleratev2EncodingResolverAttr> {
+
+  bool isSerialized(Attribute attr) const {
+    auto configuration =
+        cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
+    return configuration && configuration.contains(kEncodingInfoAttrName);
+  }
+
   Value calculateStorageSizeInBytes(Attribute attr, Location loc,
                                     OpBuilder &builder, RankedTensorType type,
                                     ValueRange dynamicDims) const {

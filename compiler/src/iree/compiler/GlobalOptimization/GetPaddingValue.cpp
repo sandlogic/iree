@@ -26,7 +26,6 @@ public:
 } // namespace
 
 void GetPaddingValuePass::runOnOperation() {
-  llvm::errs() << "Starting Exsleratev2 padding analysis pass...\n";
 
   // The pass should operate on the ModuleOp.
   auto moduleOp = getOperation();
