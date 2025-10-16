@@ -141,7 +141,6 @@ flatbuffer_c_library(
   PUBLIC
 )
 
-
 add_custom_command(OUTPUT cpu_data_headers_filegroup.stamp
     COMMAND ${CMAKE_COMMAND} -E touch cpu_data_headers_filegroup.stamp
   DEPENDS
