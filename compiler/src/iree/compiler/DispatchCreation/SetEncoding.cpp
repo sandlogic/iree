@@ -220,7 +220,7 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
     encodedInputOperands.push_back(setEncodingWrapper(
         linalgOp.getDpsInputs()[1], IREE::Encoding::CONV_RHS));
     encodedInitOperand = setEncodingWrapper(linalgOp.getDpsInits()[0],
-                                             IREE::Encoding::CONV_RESULT);
+                                            IREE::Encoding::CONV_RESULT);
   } else {
     encodedInputOperands.push_back(setEncodingWrapper(
         linalgOp.getDpsInputs()[0], IREE::Encoding::SCALED_MATMUL_LHS));
