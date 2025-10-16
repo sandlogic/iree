@@ -95,7 +95,6 @@ void GeneralizeLinalgNamedOpsPass::runOnOperation() {
       }
     }
 
-
     FailureOr<linalg::GenericOp> generalizedOp =
         linalg::generalizeNamedOp(rewriter, linalgOp);
     if (failed(generalizedOp)) {

@@ -661,5 +661,4 @@ inferConvolutionDims(ArrayRef<AffineMap> indexingMaps) {
                                   inputExprWalker,
                                   /*allowEmptyConvolvedDims=*/false);
 }
-}
-; // namespace mlir::iree_compiler::IREE::LinalgExt
+}; // namespace mlir::iree_compiler::IREE::LinalgExt
