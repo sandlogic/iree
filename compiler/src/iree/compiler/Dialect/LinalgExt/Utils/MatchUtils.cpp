@@ -554,9 +554,9 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
   bool hasadd = false;
 
   for (auto &op : body.getOperations()) {
-    if (isa<arith::MulFOp>(op))
+    if (isa<arith::MulIOp>(op))
       hasmul = true;
-    if (isa<arith::AddFOp>(op))
+    if (isa<arith::AddIOp>(op))
       hasadd = true;
   }
 
