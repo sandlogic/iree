@@ -71,7 +71,7 @@ def Linalg_TransformDialectCodegen
 def Custom
     : I32EnumAttrCase<"Custom", 1001>;
 
-def EXSLERATEV2_Conv2D 
+def EXSLERATEV2_Conv2D
     : I32EnumAttrCase<"Exsleratev2Conv2D", 1002>;
 
 def EXSLERATEV2_Pool
