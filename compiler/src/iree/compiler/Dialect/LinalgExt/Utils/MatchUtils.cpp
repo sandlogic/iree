@@ -516,7 +516,7 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
   if (hascomplexExpr(indexingMaps.back())) {
     return detail::MatchEXSLTiledConvolutionResult::OutputDimsNotParallel;
   }
-  
+
   auto genericOp = dyn_cast<mlir::linalg::GenericOp>(linalgOp.getOperation());
   Block &body = genericOp.getRegion().front();
   bool hasmul = false;
