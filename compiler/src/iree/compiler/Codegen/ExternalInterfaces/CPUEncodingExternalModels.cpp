@@ -455,9 +455,9 @@ FailureOr<Operation *> lowerConvolutionOpWithEncoding(
       ValueRange{newResult}, convertedMaps, convertedIterType,
       [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
         Value mul =
-            nestedBuilder.create<arith::MulFOp>(nestedLoc, args[0], args[1]);
+            nestedBuilder.create<arith::MulIOp>(nestedLoc, args[0], args[1]);
         Value add =
-            nestedBuilder.create<arith::AddFOp>(nestedLoc, mul, args[2]);
+            nestedBuilder.create<arith::AddIOp>(nestedLoc, mul, args[2]);
         nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
       });
   return result;
