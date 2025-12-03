@@ -478,8 +478,6 @@ cmake_dependent_option(IREE_TARGET_BACKEND_ROCM "Enables the 'rocm' compiler tar
 
 cmake_dependent_option(IREE_TARGET_BACKEND_EXSLERATEV2 "Enables the 'exsleratev2' compiler target backend" ${IREE_TARGET_BACKEND_DEFAULTS} ${IREE_BUILD_COMPILER} OFF)
 
-# option(IREE_TARGET_BACKEND_EXSLERATEV2 "Enables the 'exsleratev2' compiler target backend" OFF)
-
 if(IREE_TARGET_BACKEND_EXSLERATEV2)
   set(
     IREE_CMAKE_PLUGIN_PATHS
@@ -487,8 +485,7 @@ if(IREE_TARGET_BACKEND_EXSLERATEV2)
     CACHE STRING "Path to plugins"
     FORCE
   )
-endif() 
-
+endif()
 
 # Supported target backends that are only available on certain platforms.
 set(IREE_TARGET_BACKEND_CUDA_DEFAULT ${IREE_TARGET_BACKEND_DEFAULTS})
