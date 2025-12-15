@@ -443,6 +443,20 @@ cmake_dependent_option(IREE_TARGET_BACKEND_VULKAN_SPIRV "Enables the 'vulkan-spi
 # Default target backends that are not yet fully supported but are being brought up.
 cmake_dependent_option(IREE_TARGET_BACKEND_ROCM "Enables the 'rocm' compiler target backend" OFF ${IREE_BUILD_COMPILER} OFF)
 
+cmake_dependent_option(IREE_TARGET_BACKEND_EXSLERATEV2 "Enables the 'exsleratev2' compiler target backend" ${IREE_TARGET_BACKEND_DEFAULTS} ${IREE_BUILD_COMPILER} OFF)
+
+# option(IREE_TARGET_BACKEND_EXSLERATEV2 "Enables the 'exsleratev2' compiler target backend" OFF)
+
+if(IREE_TARGET_BACKEND_EXSLERATEV2)
+  set(
+    IREE_CMAKE_PLUGIN_PATHS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../"
+    CACHE STRING "Path to plugins"
+    FORCE
+  )
+endif() 
+
+
 # Supported target backends that are only available on certain platforms.
 set(IREE_TARGET_BACKEND_CUDA_DEFAULT ${IREE_TARGET_BACKEND_DEFAULTS})
 if(NOT IREE_CUDA_AVAILABLE)
