@@ -60,11 +60,27 @@ table DataBufferDef {
     buffer: BufferData;      // The actual buffer data with appropriate type
 }
 
+// FallBack mode enum
+enum FallBackMode : uint8 {
+    hardware = 0,
+    kernel = 1,
+    skip = 2
+}
+
+// Input Tiling Data
+table InputTileData {
+    input_tile_height: uint32 = 0; // Input data tile height (default 0)
+    input_tile_width: uint32 = 0;  // Input data tile width (default 0)
+    fallback_mode: FallBackMode = hardware; // hardware, skip or kernel
+    kernel_name: string;      // name of kernel to fallback (default empty)
+}
+
 // Layer definition
 table LayerDef {
     csr_configs: [RegisterValue];  // Layer-specific CSR register configurations
     data_buffers: [DataBufferDef]; // Layer's static data (weights, bias, etc.)
     mem_ref_defs: [MemRefDef];     // Memory metadata for inputs, outputs, etc.
+    input_tile_data: InputTileData; // Changed from array to single object
 }
 
 // Main executable definition
