@@ -61,10 +61,28 @@ void deserializeFromSLFb(const char* filename) {
   for (size_t i = 0; i < layer_count; i++) {
     iree_exsleratev2_hal_exsleratev2_LayerDef_table_t layer =
         iree_exsleratev2_hal_exsleratev2_LayerDef_vec_at(layers, i);
-    printf("Layer %zu:\n", i);
+    printf("Layer %zu: (ptr=%p)\n", i, (void*)layer);
+    if (!layer) {
+      printf("  ERROR: NULL layer pointer!\n");
+      continue;
+    }
 
     iree_exsleratev2_hal_exsleratev2_RegisterValue_vec_t csr_configs =
         iree_exsleratev2_hal_exsleratev2_LayerDef_csr_configs(layer);
+    printf("  csr_configs ptr=%p\n", (void*)csr_configs);
+
+    iree_exsleratev2_hal_exsleratev2_MemRefDef_vec_t mem_ref_defs_check =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_mem_ref_defs(layer);
+    printf("  mem_ref_defs ptr=%p\n", (void*)mem_ref_defs_check);
+
+    iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers_check =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_data_buffers(layer);
+    printf("  data_buffers ptr=%p\n", (void*)data_buffers_check);
+
+    iree_exsleratev2_hal_exsleratev2_InputTileData_table_t input_tile_data_check =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_input_tile_data(layer);
+    printf("  input_tile_data ptr=%p\n", (void*)input_tile_data_check);
+
     if (csr_configs) {
       size_t csr_count =
           iree_exsleratev2_hal_exsleratev2_RegisterValue_vec_len(csr_configs);
@@ -120,6 +138,45 @@ void deserializeFromSLFb(const char* filename) {
         printf("    %zu: id=%u, type=%d, alignment=%u\n", j, id, data_type,
                alignment);
       }
+    }
+
+    // Read InputTileData
+    iree_exsleratev2_hal_exsleratev2_InputTileData_table_t input_tile_data =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_input_tile_data(layer);
+    if (input_tile_data) {
+      uint32_t tile_h =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_input_tile_height(
+              input_tile_data);
+      uint32_t tile_w =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_input_tile_width(
+              input_tile_data);
+      uint8_t fallback_mode =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_fallback_mode(
+              input_tile_data);
+      flatbuffers_string_t kernel_name =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_kernel_name(
+              input_tile_data);
+
+      printf("  InputTileData:\n");
+      printf("    tile_height: %u\n", tile_h);
+      printf("    tile_width: %u\n", tile_w);
+      printf("    fallback_mode: %u ", fallback_mode);
+      switch (fallback_mode) {
+        case 0:
+          printf("(hardware)\n");
+          break;
+        case 1:
+          printf("(kernel)\n");
+          break;
+        case 2:
+          printf("(skip)\n");
+          break;
+        default:
+          printf("(unknown)\n");
+          break;
+      }
+      printf("    kernel_name: %s\n",
+             kernel_name ? kernel_name : "(empty)");
     }
 
     iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers =
