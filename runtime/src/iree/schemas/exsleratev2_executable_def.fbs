@@ -36,6 +36,7 @@ table RegisterValue {
     value_type: Valuetype;  // Type of the value (literal or memory reference)
     literal_value: uint32;  // Literal value if value_type is Literal
     memrefdef_id: uint32;   // Reference to MemRefDef ID if value_type is MemRefDef
+    csr_id: uint32;
 }
 
 
