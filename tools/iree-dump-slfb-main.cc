@@ -79,8 +79,9 @@ void deserializeFromSLFb(const char* filename) {
         iree_exsleratev2_hal_exsleratev2_LayerDef_data_buffers(layer);
     printf("  data_buffers ptr=%p\n", (void*)data_buffers_check);
 
-    iree_exsleratev2_hal_exsleratev2_InputTileData_table_t input_tile_data_check =
-        iree_exsleratev2_hal_exsleratev2_LayerDef_input_tile_data(layer);
+    iree_exsleratev2_hal_exsleratev2_InputTileData_table_t
+        input_tile_data_check =
+            iree_exsleratev2_hal_exsleratev2_LayerDef_input_tile_data(layer);
     printf("  input_tile_data ptr=%p\n", (void*)input_tile_data_check);
 
     if (csr_configs) {
@@ -97,10 +98,12 @@ void deserializeFromSLFb(const char* filename) {
             iree_exsleratev2_hal_exsleratev2_RegisterValue_literal_value(reg);
         uint32_t memref_id =
             iree_exsleratev2_hal_exsleratev2_RegisterValue_memrefdef_id(reg);
+        uint32_t offset =
+            iree_exsleratev2_hal_exsleratev2_RegisterValue_csr_id(reg);
 
-        printf("    %zu: type=%u, literal=%u, memref_id=%u\n", j, value_type,
-               literal_value, memref_id);
-      }
+        printf("    %zu: type=%u, offset=0x%X, literal=%u, memref_id=%u\n", j,
+               value_type, offset, literal_value, memref_id);
+              }
     }
 
     iree_exsleratev2_hal_exsleratev2_MemRefDef_vec_t mem_ref_defs =
@@ -175,8 +178,7 @@ void deserializeFromSLFb(const char* filename) {
           printf("(unknown)\n");
           break;
       }
-      printf("    kernel_name: %s\n",
-             kernel_name ? kernel_name : "(empty)");
+      printf("    kernel_name: %s\n", kernel_name ? kernel_name : "(empty)");
     }
 
     iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers =
