@@ -40,7 +40,7 @@
 // NOTE: These flags are added for experimental purposes only
 // for developer control. These should be treated as internal
 // compiler implementation details.
-static llvm::cl::opt<int> clInlineConstantByteLength(
+static llvm::cl::opt<double> clInlineConstantByteLength(
     "iree-flow-inline-constants-max-byte-length",
     llvm::cl::desc("Maximum byte-length of tensor constant that can be inlined "
                    "into a dispatch region or 0 to disable inlining."),
