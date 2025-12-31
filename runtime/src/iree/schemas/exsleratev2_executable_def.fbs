@@ -49,9 +49,14 @@ table Uint32Buffer {
     data: [uint32];         // For atomic_bank, atomic_offset, lifetime
 }
 
+table Int32Buffer {
+    data: [int32];          // For bias
+}
+
 // Union to represent different buffer data types
 union BufferData {
     Int8Buffer,
+    Int32Buffer,
     Uint32Buffer
 }
 
