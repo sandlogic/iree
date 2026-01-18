@@ -44,16 +44,16 @@ enum class MatchContractionResult {
   NotAddMul
 };
 
-enum class MatchEXSLTiledConvolutionResult {
-  Success = 0,
-  NotLinalgOp,
-  WrongNoWeightDims,
-  WrongNumOperands,
-  WrongIndexingMap,
-  OutputDimsNotParallel,
-  NonOutputDimNotReduction,
-  NoAddMulOp
-};
+// enum class MatchEXSLTiledConvolutionResult {
+//   Success = 0,
+//   NotLinalgOp,
+//   WrongNoWeightDims,
+//   WrongNumOperands,
+//   WrongIndexingMap,
+//   OutputDimsNotParallel,
+//   NonOutputDimNotReduction,
+//   NoAddMulOp
+// };
 
 } // namespace detail
 
@@ -439,226 +439,226 @@ bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp) {
   return isScaledContractionImpl(op) == detail::MatchContractionResult::Success;
 }
 
-detail::MatchEXSLTiledConvolutionResult
-isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
+// detail::MatchEXSLTiledConvolutionResult
+// isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
 
-  auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
-  if (!linalgOp) {
-    return detail::MatchEXSLTiledConvolutionResult::NotLinalgOp;
-  }
+//   auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+//   if (!linalgOp) {
+//     return detail::MatchEXSLTiledConvolutionResult::NotLinalgOp;
+//   }
 
-  if (linalgOp.getNumDpsInputs() < 2 || linalgOp.getNumDpsInits() != 1)
-    return detail::MatchEXSLTiledConvolutionResult::WrongNumOperands;
+//   if (linalgOp.getNumDpsInputs() < 2 || linalgOp.getNumDpsInits() != 1)
+//     return detail::MatchEXSLTiledConvolutionResult::WrongNumOperands;
 
-  auto indexingMaps = linalgOp.getIndexingMapsArray();
-  auto iteratortypes = linalgOp.getIteratorTypesArray();
+//   auto indexingMaps = linalgOp.getIndexingMapsArray();
+//   auto iteratortypes = linalgOp.getIteratorTypesArray();
 
-  if (indexingMaps.size() < 3)
-    return detail::MatchEXSLTiledConvolutionResult::WrongIndexingMap;
+//   if (indexingMaps.size() < 3)
+//     return detail::MatchEXSLTiledConvolutionResult::WrongIndexingMap;
 
-  bool hasParallel = false;
-  bool hasReduction = false;
-  SmallVector<bool> isReductionDim(iteratortypes.size(), false);
+//   bool hasParallel = false;
+//   bool hasReduction = false;
+//   SmallVector<bool> isReductionDim(iteratortypes.size(), false);
 
-  for (auto [idx, itertype] : llvm::enumerate(iteratortypes)) {
-    if (itertype == utils::IteratorType::parallel) {
-      hasParallel = true;
-    } else if (itertype == utils::IteratorType::reduction) {
-      hasReduction = true;
-      isReductionDim[idx] = true;
-    }
-  }
+//   for (auto [idx, itertype] : llvm::enumerate(iteratortypes)) {
+//     if (itertype == utils::IteratorType::parallel) {
+//       hasParallel = true;
+//     } else if (itertype == utils::IteratorType::reduction) {
+//       hasReduction = true;
+//       isReductionDim[idx] = true;
+//     }
+//   }
 
-  if (!hasParallel || !hasReduction) {
-    return detail::MatchEXSLTiledConvolutionResult::NonOutputDimNotReduction;
-  }
+//   if (!hasParallel || !hasReduction) {
+//     return detail::MatchEXSLTiledConvolutionResult::NonOutputDimNotReduction;
+//   }
 
-  auto inputMap = indexingMaps[0];
-  int count = 0;
+//   auto inputMap = indexingMaps[0];
+//   int count = 0;
 
-  for (auto expr : inputMap.getResults()) {
-    //  patter for :  (parallel  * const +reduction  ) or (parallel+ reduction)
-    if (auto addexpr = dyn_cast<AffineBinaryOpExpr>(expr)) {
+//   for (auto expr : inputMap.getResults()) {
+//     //  patter for :  (parallel  * const +reduction  ) or (parallel+ reduction)
+//     if (auto addexpr = dyn_cast<AffineBinaryOpExpr>(expr)) {
 
-      if (addexpr.getKind() == AffineExprKind::Add) {
+//       if (addexpr.getKind() == AffineExprKind::Add) {
 
-        auto checkOperands = [&](AffineExpr lhs, AffineExpr rhs) -> bool {
-          // (parallel * const + red)  or (red  + (parallel * stride)
-          if (auto mulExpr = dyn_cast<AffineBinaryOpExpr>(lhs)) {
+//         auto checkOperands = [&](AffineExpr lhs, AffineExpr rhs) -> bool {
+//           // (parallel * const + red)  or (red  + (parallel * stride)
+//           if (auto mulExpr = dyn_cast<AffineBinaryOpExpr>(lhs)) {
 
-            if (mulExpr.getKind() == AffineExprKind::Mul) {
+//             if (mulExpr.getKind() == AffineExprKind::Mul) {
 
-              if (auto dimExpr = dyn_cast<AffineDimExpr>(mulExpr.getLHS())) {
-                if (auto constExpr =
-                        dyn_cast<AffineConstantExpr>(mulExpr.getRHS())) {
+//               if (auto dimExpr = dyn_cast<AffineDimExpr>(mulExpr.getLHS())) {
+//                 if (auto constExpr =
+//                         dyn_cast<AffineConstantExpr>(mulExpr.getRHS())) {
 
-                  if (auto reductionDimExpr = dyn_cast<AffineDimExpr>(rhs)) {
-                    unsigned parallelDim = dimExpr.getPosition();
-                    unsigned reductionDim = reductionDimExpr.getPosition();
-                    if (parallelDim < isReductionDim.size() &&
-                        reductionDim < isReductionDim.size() &&
-                        !isReductionDim[parallelDim] &&
-                        isReductionDim[reductionDim]) {
-                      return true;
-                    }
-                  }
-                }
-              }
-            }
-          }
-          // parallel + reduction
-          if (auto parallelDimExpr = dyn_cast<AffineDimExpr>(lhs)) {
+//                   if (auto reductionDimExpr = dyn_cast<AffineDimExpr>(rhs)) {
+//                     unsigned parallelDim = dimExpr.getPosition();
+//                     unsigned reductionDim = reductionDimExpr.getPosition();
+//                     if (parallelDim < isReductionDim.size() &&
+//                         reductionDim < isReductionDim.size() &&
+//                         !isReductionDim[parallelDim] &&
+//                         isReductionDim[reductionDim]) {
+//                       return true;
+//                     }
+//                   }
+//                 }
+//               }
+//             }
+//           }
+//           // parallel + reduction
+//           if (auto parallelDimExpr = dyn_cast<AffineDimExpr>(lhs)) {
 
-            if (auto reductionDimExpr = dyn_cast<AffineDimExpr>(rhs)) {
-              unsigned parallelDim = parallelDimExpr.getPosition();
-              unsigned reductionDim = reductionDimExpr.getPosition();
-              if (parallelDim < isReductionDim.size() &&
-                  reductionDim < isReductionDim.size() &&
-                  !isReductionDim[parallelDim] &&
-                  isReductionDim[reductionDim]) {
-                return true;
-              }
-            }
-          }
+//             if (auto reductionDimExpr = dyn_cast<AffineDimExpr>(rhs)) {
+//               unsigned parallelDim = parallelDimExpr.getPosition();
+//               unsigned reductionDim = reductionDimExpr.getPosition();
+//               if (parallelDim < isReductionDim.size() &&
+//                   reductionDim < isReductionDim.size() &&
+//                   !isReductionDim[parallelDim] &&
+//                   isReductionDim[reductionDim]) {
+//                 return true;
+//               }
+//             }
+//           }
 
-          return false;
-        };
+//           return false;
+//         };
 
-        if (checkOperands(addexpr.getLHS(), addexpr.getRHS()) ||
-            checkOperands(addexpr.getRHS(), addexpr.getLHS())) {
-          count++;
-        }
-      }
-    }
-  }
+//         if (checkOperands(addexpr.getLHS(), addexpr.getRHS()) ||
+//             checkOperands(addexpr.getRHS(), addexpr.getLHS())) {
+//           count++;
+//         }
+//       }
+//     }
+//   }
 
-  if (count < 2)
-    return detail::MatchEXSLTiledConvolutionResult::NonOutputDimNotReduction;
+//   if (count < 2)
+//     return detail::MatchEXSLTiledConvolutionResult::NonOutputDimNotReduction;
 
-  auto hascomplexExpr = [](AffineMap map) {
-    for (auto expr : map.getResults()) {
-      if (isa<AffineBinaryOpExpr>(expr))
-        return true;
-    }
+//   auto hascomplexExpr = [](AffineMap map) {
+//     for (auto expr : map.getResults()) {
+//       if (isa<AffineBinaryOpExpr>(expr))
+//         return true;
+//     }
 
-    return false;
-  };
+//     return false;
+//   };
 
-  if (hascomplexExpr(indexingMaps.back())) {
-    return detail::MatchEXSLTiledConvolutionResult::OutputDimsNotParallel;
-  }
+//   if (hascomplexExpr(indexingMaps.back())) {
+//     return detail::MatchEXSLTiledConvolutionResult::OutputDimsNotParallel;
+//   }
 
-  auto genericOp = dyn_cast<mlir::linalg::GenericOp>(linalgOp.getOperation());
-  Block &body = genericOp.getRegion().front();
-  bool hasmul = false;
-  bool hasadd = false;
+//   auto genericOp = dyn_cast<mlir::linalg::GenericOp>(linalgOp.getOperation());
+//   Block &body = genericOp.getRegion().front();
+//   bool hasmul = false;
+//   bool hasadd = false;
 
-  for (auto &op : body.getOperations()) {
-    if (isa<arith::MulIOp>(op))
-      hasmul = true;
-    if (isa<arith::AddIOp>(op))
-      hasadd = true;
-  }
+//   for (auto &op : body.getOperations()) {
+//     if (isa<arith::MulIOp>(op))
+//       hasmul = true;
+//     if (isa<arith::AddIOp>(op))
+//       hasadd = true;
+//   }
 
-  if (!(hasmul && hasadd))
-    return detail::MatchEXSLTiledConvolutionResult::NoAddMulOp;
+//   if (!(hasmul && hasadd))
+//     return detail::MatchEXSLTiledConvolutionResult::NoAddMulOp;
 
-  if (indexingMaps[1].getResults().size() != 6)
-    return detail::MatchEXSLTiledConvolutionResult::WrongNoWeightDims;
+//   if (indexingMaps[1].getResults().size() != 6)
+//     return detail::MatchEXSLTiledConvolutionResult::WrongNoWeightDims;
 
-  return detail::MatchEXSLTiledConvolutionResult::Success;
-}
+//   return detail::MatchEXSLTiledConvolutionResult::Success;
+// }
 
-bool isaEXSLTileConvolutionOpInterface(linalg::LinalgOp linalgOp) {
-  if (!linalgOp) {
-    return false;
-  }
-  return isEXSLTiledConvolutionInterfaceImpl(linalgOp.getOperation()) ==
-         detail::MatchEXSLTiledConvolutionResult::Success;
-}
+// bool isaEXSLTileConvolutionOpInterface(linalg::LinalgOp linalgOp) {
+//   if (!linalgOp) {
+//     return false;
+//   }
+//   return isEXSLTiledConvolutionInterfaceImpl(linalgOp.getOperation()) ==
+//          detail::MatchEXSLTiledConvolutionResult::Success;
+// }
 
-FailureOr<linalg::ConvolutionDimensions> inferConvolutionDimsImpl(
-    ArrayRef<AffineMap> indexingMaps, ArrayRef<utils::IteratorType> iterators,
-    ConvAccessExprWalker &inputExprWalker, bool allowEmptyConvolvedDims) {
-  if (indexingMaps.size() < 3) {
-    return failure();
-  }
-  llvm::SmallDenseSet<int64_t> filterDims =
-      findPermutationsIndexingOperand(indexingMaps[1], iterators, par);
-  llvm::SmallDenseSet<int64_t> outputDims =
-      findPermutationsIndexingOperand(indexingMaps[2], iterators, par);
+// FailureOr<linalg::ConvolutionDimensions> inferConvolutionDimsImpl(
+//     ArrayRef<AffineMap> indexingMaps, ArrayRef<utils::IteratorType> iterators,
+//     ConvAccessExprWalker &inputExprWalker, bool allowEmptyConvolvedDims) {
+//   if (indexingMaps.size() < 3) {
+//     return failure();
+//   }
+//   llvm::SmallDenseSet<int64_t> filterDims =
+//       findPermutationsIndexingOperand(indexingMaps[1], iterators, par);
+//   llvm::SmallDenseSet<int64_t> outputDims =
+//       findPermutationsIndexingOperand(indexingMaps[2], iterators, par);
 
-  // unConvolvedDims & outputDims - filterDims are the batch iterators.
-  llvm::SmallDenseSet<int64_t> batch = inputExprWalker.unConvolvedDims;
-  llvm::set_intersect(batch, outputDims);
-  llvm::set_subtract(batch, filterDims);
+//   // unConvolvedDims & outputDims - filterDims are the batch iterators.
+//   llvm::SmallDenseSet<int64_t> batch = inputExprWalker.unConvolvedDims;
+//   llvm::set_intersect(batch, outputDims);
+//   llvm::set_subtract(batch, filterDims);
 
-  // convolvedDims & outputDims are the output image iterators.
-  llvm::SmallDenseSet<int64_t> oi = inputExprWalker.convolvedDims;
-  llvm::set_intersect(oi, outputDims);
+//   // convolvedDims & outputDims are the output image iterators.
+//   llvm::SmallDenseSet<int64_t> oi = inputExprWalker.convolvedDims;
+//   llvm::set_intersect(oi, outputDims);
 
-  // filterDims & outputDims - unConvolvedDims are the output channel
-  // iterators.
-  llvm::SmallDenseSet<int64_t> oc = filterDims;
-  llvm::set_intersect(oc, outputDims);
-  llvm::set_subtract(oc, inputExprWalker.unConvolvedDims);
+//   // filterDims & outputDims - unConvolvedDims are the output channel
+//   // iterators.
+//   llvm::SmallDenseSet<int64_t> oc = filterDims;
+//   llvm::set_intersect(oc, outputDims);
+//   llvm::set_subtract(oc, inputExprWalker.unConvolvedDims);
 
-  // filterDims & outputDims & unConvolvedDims are the depth iterators.
-  llvm::SmallDenseSet<int64_t> depth = filterDims;
-  llvm::set_intersect(depth, outputDims);
-  llvm::set_intersect(depth, inputExprWalker.unConvolvedDims);
+//   // filterDims & outputDims & unConvolvedDims are the depth iterators.
+//   llvm::SmallDenseSet<int64_t> depth = filterDims;
+//   llvm::set_intersect(depth, outputDims);
+//   llvm::set_intersect(depth, inputExprWalker.unConvolvedDims);
 
-  llvm::SmallDenseSet<int64_t> filterReducedDims =
-      findPermutationsIndexingOperand(indexingMaps[1], iterators, red);
+//   llvm::SmallDenseSet<int64_t> filterReducedDims =
+//       findPermutationsIndexingOperand(indexingMaps[1], iterators, red);
 
-  // convolvedDims & filterReducedDims are the filter loop iterators.
-  llvm::SmallDenseSet<int64_t> fl = inputExprWalker.convolvedDims;
-  llvm::set_intersect(fl, filterReducedDims);
+//   // convolvedDims & filterReducedDims are the filter loop iterators.
+//   llvm::SmallDenseSet<int64_t> fl = inputExprWalker.convolvedDims;
+//   llvm::set_intersect(fl, filterReducedDims);
 
-  // unConvolvedDims & filterReducedDims are the input channel iterators.
-  llvm::SmallDenseSet<int64_t> ic = inputExprWalker.unConvolvedDims;
-  llvm::set_intersect(ic, filterReducedDims);
+//   // unConvolvedDims & filterReducedDims are the input channel iterators.
+//   llvm::SmallDenseSet<int64_t> ic = inputExprWalker.unConvolvedDims;
+//   llvm::set_intersect(ic, filterReducedDims);
 
-  if (oi.empty() && !allowEmptyConvolvedDims)
-    return failure();
+//   if (oi.empty() && !allowEmptyConvolvedDims)
+//     return failure();
 
-  // Return each set in sorted order.
-  linalg::ConvolutionDimensions dimensions{
-      SmallVector<unsigned, 2>(batch.begin(), batch.end()),
-      SmallVector<unsigned, 2>(oi.begin(), oi.end()),
-      SmallVector<unsigned, 2>(oc.begin(), oc.end()),
-      SmallVector<unsigned, 2>(fl.begin(), fl.end()),
-      SmallVector<unsigned, 2>(ic.begin(), ic.end()),
-      SmallVector<unsigned, 2>(depth.begin(), depth.end()),
-      /*strides=*/SmallVector<int64_t, 2>{},
-      /*dilations=*/SmallVector<int64_t, 2>{}};
-  llvm::sort(dimensions.batch);
-  llvm::sort(dimensions.outputImage);
-  llvm::sort(dimensions.outputChannel);
-  llvm::sort(dimensions.filterLoop);
-  llvm::sort(dimensions.inputChannel);
-  llvm::sort(dimensions.depth);
+//   // Return each set in sorted order.
+//   linalg::ConvolutionDimensions dimensions{
+//       SmallVector<unsigned, 2>(batch.begin(), batch.end()),
+//       SmallVector<unsigned, 2>(oi.begin(), oi.end()),
+//       SmallVector<unsigned, 2>(oc.begin(), oc.end()),
+//       SmallVector<unsigned, 2>(fl.begin(), fl.end()),
+//       SmallVector<unsigned, 2>(ic.begin(), ic.end()),
+//       SmallVector<unsigned, 2>(depth.begin(), depth.end()),
+//       /*strides=*/SmallVector<int64_t, 2>{},
+//       /*dilations=*/SmallVector<int64_t, 2>{}};
+//   llvm::sort(dimensions.batch);
+//   llvm::sort(dimensions.outputImage);
+//   llvm::sort(dimensions.outputChannel);
+//   llvm::sort(dimensions.filterLoop);
+//   llvm::sort(dimensions.inputChannel);
+//   llvm::sort(dimensions.depth);
 
-  return dimensions;
-}
+//   return dimensions;
+// }
 
-FailureOr<linalg::ConvolutionDimensions>
-inferConvolutionDims(ArrayRef<AffineMap> indexingMaps) {
-  if (indexingMaps.size() < 3) {
-    return failure();
-  }
-  auto iterators = inferIteratorsFromOutMap(indexingMaps[2]);
-  if (failed(iterators)) {
-    return failure();
-  }
+// FailureOr<linalg::ConvolutionDimensions>
+// inferConvolutionDims(ArrayRef<AffineMap> indexingMaps) {
+//   if (indexingMaps.size() < 3) {
+//     return failure();
+//   }
+//   auto iterators = inferIteratorsFromOutMap(indexingMaps[2]);
+//   if (failed(iterators)) {
+//     return failure();
+//   }
 
-  ConvAccessExprWalker inputExprWalker;
-  for (AffineExpr expr : indexingMaps[0].getResults())
-    (void)inputExprWalker.visit(expr);
-  inputExprWalker.clearMultiUseDims(indexingMaps[0]);
+//   ConvAccessExprWalker inputExprWalker;
+//   for (AffineExpr expr : indexingMaps[0].getResults())
+//     (void)inputExprWalker.visit(expr);
+//   inputExprWalker.clearMultiUseDims(indexingMaps[0]);
 
-  return inferConvolutionDimsImpl(indexingMaps, iterators.value(),
-                                  inputExprWalker,
-                                  /*allowEmptyConvolvedDims=*/false);
-}
+//   return inferConvolutionDimsImpl(indexingMaps, iterators.value(),
+//                                   inputExprWalker,
+//                                   /*allowEmptyConvolvedDims=*/false);
+// }
 }; // namespace mlir::iree_compiler::IREE::LinalgExt

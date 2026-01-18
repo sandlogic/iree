@@ -176,16 +176,16 @@ static Value createElementWiseExtUIOp(OpBuilder &builder, Value input,
       .getResult(0);
 }
 
-static Value getTileConvOperand(Value value, linalg::LinalgOp linalgOp,
-                                OpBuilder &builder,
-                                SmallVectorImpl<ReassociationIndices> &ri,
-                                ArrayRef<Type> elemTypes, int operandIndex) {
-  assert(linalgOp.getNumDpsInputs() == 2);
-  assert(linalgOp.getNumDpsInits() == 1);
-  auto convDims = linalg::inferConvolutionDims(linalgOp);
-  Value expandedValue = value;
-  return expandedValue;
-}
+// static Value getTileConvOperand(Value value, linalg::LinalgOp linalgOp,
+//                                 OpBuilder &builder,
+//                                 SmallVectorImpl<ReassociationIndices> &ri,
+//                                 ArrayRef<Type> elemTypes, int operandIndex) {
+//   assert(linalgOp.getNumDpsInputs() == 2);
+//   assert(linalgOp.getNumDpsInits() == 1);
+//   auto convDims = linalg::inferConvolutionDims(linalgOp);
+//   Value expandedValue = value;
+//   return expandedValue;
+// }
 /// If needed, expand and the input Value, and return the resulting input with
 /// the canonical mmt4d input shape. If the input element type is unsigned,
 /// create a producer Linalg::GenericOp on the input that unsigned extends the
@@ -309,7 +309,7 @@ TileNxHxWxC chooseConvTile(const SmallVector<TileNxHxWxC> &tiles) {
   return tiles.front();
 }
 
-FailureOr<Operation *> lowerContractionOpWithEncoding(
+Operation * lowerContractionOpWithEncoding(
     OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
     IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
   if (!linalgOp.hasPureTensorSemantics()) {
@@ -385,92 +385,92 @@ FailureOr<Operation *> lowerContractionOpWithEncoding(
   return result;
 }
 
-FailureOr<Operation *> lowerConvolutionOpWithEncoding(
-    OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
-    IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
-  if (!linalgOp.hasPureTensorSemantics()) {
-    return failure();
-  }
-  auto inputs = linalgOp.getDpsInputOperands();
-  auto outputs = linalgOp.getDpsInits();
-
-  auto lhsType = cast<RankedTensorType>(inputs[0]->get().getType());
-  auto rhsType = cast<RankedTensorType>(inputs[1]->get().getType());
-  auto resultType = cast<RankedTensorType>(outputs[0].getType());
-  auto inputEncoding = IREE::Encoding::getEncodingAttr(lhsType);
-  auto filterEncoding = IREE::Encoding::getEncodingAttr(rhsType);
-  auto resultEncoding = IREE::Encoding::getEncodingAttr(resultType);
-  if (!inputEncoding || !filterEncoding || !resultEncoding) {
-    return failure();
-  }
-
-  if (inputEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_LHS ||
-      filterEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_RHS ||
-      resultEncoding.getOperandIndex().getValue() !=
-          IREE::Encoding::CONV_RESULT) {
-    return failure();
-  }
-
-  MaterializeEncodingInfo encodingInfo = {};
-  if (auto packedLayoutAttr =
-          dyn_cast<IREE::Codegen::PackedLayoutMaterializerAttr>(layoutAttr)) {
-    encodingInfo = packedLayoutAttr.getEncodingInfo(
-        cast<RankedTensorType>(linalgOp->getResultTypes()[0]));
-  }
-
-  if (isIdentityLayout(encodingInfo)) {
-    return dropEncodingAndCloneOp(builder, linalgOp,
-                                  operands.take_front(inputs.size()),
-                                  operands.drop_front(inputs.size()));
-  }
-
-  Operation *result;
-  SmallVector<Type> elemTypes = inputEncoding.getElementTypesArray();
-  SmallVector<utils::IteratorType> iterTypesVec =
-      linalgOp.getIteratorTypesArray();
-  iterTypesVec.append(2, utils::IteratorType::parallel);
-  ArrayRef<utils::IteratorType> convertedIterType = iterTypesVec;
-
-  SmallVector<AffineMap> maps = linalgOp.getIndexingMapsArray();
-  SmallVector<AffineMap> convertedMaps;
-  int64_t originalRank = linalgOp.getStaticLoopRanges().size();
-  int64_t convertedRank = originalRank + 2;
-
-  AffineExpr filterTile = builder.getAffineDimExpr(originalRank);
-  AffineExpr channelTile = builder.getAffineDimExpr(originalRank + 1);
-
-  for (auto [idx, map] : llvm::enumerate(linalgOp.getIndexingMapsArray())) {
-    SmallVector<AffineExpr> results(map.getResults());
-    if (idx == IREE::Encoding::CONV_RHS) {
-      results.append({filterTile, channelTile});
-    } else if (idx == IREE::Encoding::CONV_LHS ||
-               idx == IREE::Encoding::CONV_RESULT) {
-      results.append({filterTile});
-    }
-    convertedMaps.push_back(
-        AffineMap::get(convertedRank, 0, results, builder.getContext()));
-  }
-
-  SmallVector<ReassociationIndices> ri;
-  Value newLHS =
-      getTileConvOperand(operands[0], linalgOp, builder, ri, elemTypes, 0);
-  Value newRHS =
-      getTileConvOperand(operands[1], linalgOp, builder, ri, elemTypes, 1);
-  Value newResult =
-      getTileConvOperand(operands[2], linalgOp, builder, ri, elemTypes, 2);
-  Type newResultType = newResult.getType();
-  result = builder.create<linalg::GenericOp>(
-      linalgOp.getLoc(), newResultType, ValueRange{newLHS, newRHS},
-      ValueRange{newResult}, convertedMaps, convertedIterType,
-      [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-        Value mul =
-            nestedBuilder.create<arith::MulIOp>(nestedLoc, args[0], args[1]);
-        Value add =
-            nestedBuilder.create<arith::AddIOp>(nestedLoc, mul, args[2]);
-        nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
-      });
-  return result;
-}
+// FailureOr<Operation *> lowerConvolutionOpWithEncoding(
+//     OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
+//     IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
+//   if (!linalgOp.hasPureTensorSemantics()) {
+//     return failure();
+//   }
+//   auto inputs = linalgOp.getDpsInputOperands();
+//   auto outputs = linalgOp.getDpsInits();
+//
+//   auto lhsType = cast<RankedTensorType>(inputs[0]->get().getType());
+//   auto rhsType = cast<RankedTensorType>(inputs[1]->get().getType());
+//   auto resultType = cast<RankedTensorType>(outputs[0].getType());
+//   auto inputEncoding = IREE::Encoding::getEncodingAttr(lhsType);
+//   auto filterEncoding = IREE::Encoding::getEncodingAttr(rhsType);
+//   auto resultEncoding = IREE::Encoding::getEncodingAttr(resultType);
+//   if (!inputEncoding || !filterEncoding || !resultEncoding) {
+//     return failure();
+//   }
+//
+//   if (inputEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_LHS ||
+//       filterEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_RHS ||
+//       resultEncoding.getOperandIndex().getValue() !=
+//           IREE::Encoding::CONV_RESULT) {
+//     return failure();
+//   }
+//
+//   MaterializeEncodingInfo encodingInfo = {};
+//   if (auto packedLayoutAttr =
+//           dyn_cast<IREE::Codegen::PackedLayoutMaterializerAttr>(layoutAttr)) {
+//     encodingInfo = packedLayoutAttr.getEncodingInfo(
+//         cast<RankedTensorType>(linalgOp->getResultTypes()[0]));
+//   }
+//
+//   if (isIdentityLayout(encodingInfo)) {
+//     return dropEncodingAndCloneOp(builder, linalgOp,
+//                                   operands.take_front(inputs.size()),
+//                                   operands.drop_front(inputs.size()));
+//   }
+//
+//   Operation *result;
+//   SmallVector<Type> elemTypes = inputEncoding.getElementTypesArray();
+//   SmallVector<utils::IteratorType> iterTypesVec =
+//       linalgOp.getIteratorTypesArray();
+//   iterTypesVec.append(2, utils::IteratorType::parallel);
+//   ArrayRef<utils::IteratorType> convertedIterType = iterTypesVec;
+//
+//   SmallVector<AffineMap> maps = linalgOp.getIndexingMapsArray();
+//   SmallVector<AffineMap> convertedMaps;
+//   int64_t originalRank = linalgOp.getStaticLoopRanges().size();
+//   int64_t convertedRank = originalRank + 2;
+//
+//   AffineExpr filterTile = builder.getAffineDimExpr(originalRank);
+//   AffineExpr channelTile = builder.getAffineDimExpr(originalRank + 1);
+//
+//   for (auto [idx, map] : llvm::enumerate(linalgOp.getIndexingMapsArray())) {
+//     SmallVector<AffineExpr> results(map.getResults());
+//     if (idx == IREE::Encoding::CONV_RHS) {
+//       results.append({filterTile, channelTile});
+//     } else if (idx == IREE::Encoding::CONV_LHS ||
+//                idx == IREE::Encoding::CONV_RESULT) {
+//       results.append({filterTile});
+//     }
+//     convertedMaps.push_back(
+//         AffineMap::get(convertedRank, 0, results, builder.getContext()));
+//   }
+//
+//   SmallVector<ReassociationIndices> ri;
+//   Value newLHS =
+//       getTileConvOperand(operands[0], linalgOp, builder, ri, elemTypes, 0);
+//   Value newRHS =
+//       getTileConvOperand(operands[1], linalgOp, builder, ri, elemTypes, 1);
+//   Value newResult =
+//       getTileConvOperand(operands[2], linalgOp, builder, ri, elemTypes, 2);
+//   Type newResultType = newResult.getType();
+//   result = builder.create<linalg::GenericOp>(
+//       linalgOp.getLoc(), newResultType, ValueRange{newLHS, newRHS},
+//       ValueRange{newResult}, convertedMaps, convertedIterType,
+//       [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+//         Value mul =
+//             nestedBuilder.create<arith::MulIOp>(nestedLoc, args[0], args[1]);
+//         Value add =
+//             nestedBuilder.create<arith::AddIOp>(nestedLoc, mul, args[2]);
+//         nestedBuilder.create<linalg::YieldOp>(nestedLoc, add);
+//       });
+//   return result;
+// }
 
 //===----------------------------------------------------------------------===//
 // Interface methods implementation for iree_cpu.cpu_encoding_resolver.
@@ -794,12 +794,12 @@ enumerateCPUMatmulTiles(IREE::Encoding::EncodingAttr encoding,
   return {};
 }
 
-static SmallVector<TileNxHxWxC>
-enumerateExsleratev2ConvTiles(IREE::Encoding::EncodingAttr encoding,
-                              DictionaryAttr config) {
-  // Fallback - no architecture-optimized tile size for this case.
-  return {TileNxHxWxC{32, 1, 1, 32}};
-}
+// static SmallVector<TileNxHxWxC>
+// enumerateExsleratev2ConvTiles(IREE::Encoding::EncodingAttr encoding,
+//                               DictionaryAttr config) {
+//   // Fallback - no architecture-optimized tile size for this case.
+//   return {TileNxHxWxC{32, 1, 1, 32}};
+// }
 
 struct CPUEncodingPackedLayoutMaterializerAttr
     : PackedLayoutMaterializerAttrExternalModelBase<
@@ -1114,100 +1114,100 @@ struct VMVXEncodingResolverVerifier
 };
 
 // Interface for Exsleratev2
-struct Exsleratev2EncodingPackedLayoutMaterializerAttr
-    : public PackedLayoutMaterializerAttrExternalModelBase<
-          Exsleratev2EncodingPackedLayoutMaterializerAttr,
-          Exsleratev2EncodingResolverAttr> {
-  DictionaryAttr getConfiguration(Attribute attr) const {
-    return cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
-  }
-
-  MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
-                                              RankedTensorType type) const {
-    auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
-
-    auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
-        type.getEncoding());
-
-    MaterializeEncodingInfo info;
-    if (!encoding) {
-      return info;
-    }
-
-    SmallVector<TileNxHxWxC> enumeratedTileNxHxWxC =
-        enumerateExsleratev2ConvTiles(encoding, layoutAttr.getConfiguration());
-    if (enumeratedTileNxHxWxC.empty()) {
-      return info;
-    }
-
-    TileNxHxWxC chosenTileNxHxWxC = chooseConvTile(enumeratedTileNxHxWxC);
-    FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
-        getEncodingInfoForConv(encoding, chosenTileNxHxWxC);
-    if (failed(maybeEncodingInfo)) {
-      return info;
-    }
-    info = std::move(maybeEncodingInfo.value());
-
-    return info;
-  }
-};
-
-struct Exsleratev2EncodingResolverMaterializerAttr final
-    : EncodingLayoutMaterializerAttrExternalModelBase<
-          Exsleratev2EncodingResolverMaterializerAttr,
-          Exsleratev2EncodingResolverAttr> {
-
-  Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
-                     TypeRange convertedResTypes,
-                     ValueRange convertedOperands) const {
-    auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
-    auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
-    if (!linalgOp) {
-      return nullptr;
-    }
-
-    FailureOr<Operation *> newOp = lowerConvolutionOpWithEncoding(
-        b, linalgOp, convertedOperands,
-        cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
-    return newOp.value_or(nullptr);
-  }
-};
-
-struct Exsleratev2LayoutResolverAttr final
-    : IREE::Encoding::LayoutResolverAttr::ExternalModel<
-          Exsleratev2LayoutResolverAttr, Exsleratev2EncodingResolverAttr> {
-  Attribute cloneWithSimplifiedConfig(Attribute attr,
-                                      DictionaryAttr config) const {
-    MLIRContext *ctx = attr.getContext();
-    SmallVector<NamedAttribute> configItems;
-    return Exsleratev2EncodingResolverAttr::get(
-        ctx, DictionaryAttr::get(ctx, configItems));
-  }
-
-  Attribute getLayout(Attribute attr, RankedTensorType type) const {
-    MLIRContext *ctx = attr.getContext();
-    return Exsleratev2EncodingResolverAttr::get(
-        ctx, getPackedLayoutImpl(attr, type, /*addEncodingAttr=*/true));
-  }
-};
-
-struct Exsleratev2SerializableAttr final
-    : IREE::Encoding::SerializableAttr::ExternalModel<
-          Exsleratev2SerializableAttr, Exsleratev2EncodingResolverAttr> {
-
-  bool isSerialized(Attribute attr) const {
-    auto configuration =
-        cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
-    return configuration && configuration.contains(kEncodingInfoAttrName);
-  }
-
-  Value calculateStorageSizeInBytes(Attribute attr, Location loc,
-                                    OpBuilder &builder, RankedTensorType type,
-                                    ValueRange dynamicDims) const {
-    return calculatePackedStorageSizeInBytesImpl(attr, loc, builder, type,
-                                                 dynamicDims);
-  }
-};
+// struct Exsleratev2EncodingPackedLayoutMaterializerAttr
+//     : public PackedLayoutMaterializerAttrExternalModelBase<
+//           Exsleratev2EncodingPackedLayoutMaterializerAttr,
+//           Exsleratev2EncodingResolverAttr> {
+//   DictionaryAttr getConfiguration(Attribute attr) const {
+//     return cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
+//   }
+//
+//   MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
+//                                               RankedTensorType type) const {
+//     auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
+//
+//     auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
+//         type.getEncoding());
+//
+//     MaterializeEncodingInfo info;
+//     if (!encoding) {
+//       return info;
+//     }
+//
+//     SmallVector<TileNxHxWxC> enumeratedTileNxHxWxC =
+//         enumerateExsleratev2ConvTiles(encoding, layoutAttr.getConfiguration());
+//     if (enumeratedTileNxHxWxC.empty()) {
+//       return info;
+//     }
+//
+//     TileNxHxWxC chosenTileNxHxWxC = chooseConvTile(enumeratedTileNxHxWxC);
+//     FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
+//         getEncodingInfoForConv(encoding, chosenTileNxHxWxC);
+//     if (failed(maybeEncodingInfo)) {
+//       return info;
+//     }
+//     info = std::move(maybeEncodingInfo.value());
+//
+//     return info;
+//   }
+// };
+//
+// struct Exsleratev2EncodingResolverMaterializerAttr final
+//     : EncodingLayoutMaterializerAttrExternalModelBase<
+//           Exsleratev2EncodingResolverMaterializerAttr,
+//           Exsleratev2EncodingResolverAttr> {
+//
+//   Operation *lowerOp(Attribute attr, OpBuilder &b, Operation *op,
+//                      TypeRange convertedResTypes,
+//                      ValueRange convertedOperands) const {
+//     auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
+//     auto linalgOp = llvm::dyn_cast<linalg::LinalgOp>(op);
+//     if (!linalgOp) {
+//       return nullptr;
+//     }
+//
+//     FailureOr<Operation *> newOp = lowerConvolutionOpWithEncoding(
+//         b, linalgOp, convertedOperands,
+//         cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
+//     return newOp.value_or(nullptr);
+//   }
+// };
+//
+// struct Exsleratev2LayoutResolverAttr final
+//     : IREE::Encoding::LayoutResolverAttr::ExternalModel<
+//           Exsleratev2LayoutResolverAttr, Exsleratev2EncodingResolverAttr> {
+//   Attribute cloneWithSimplifiedConfig(Attribute attr,
+//                                       DictionaryAttr config) const {
+//     MLIRContext *ctx = attr.getContext();
+//     SmallVector<NamedAttribute> configItems;
+//     return Exsleratev2EncodingResolverAttr::get(
+//         ctx, DictionaryAttr::get(ctx, configItems));
+//   }
+//
+//   Attribute getLayout(Attribute attr, RankedTensorType type) const {
+//     MLIRContext *ctx = attr.getContext();
+//     return Exsleratev2EncodingResolverAttr::get(
+//         ctx, getPackedLayoutImpl(attr, type, /*addEncodingAttr=*/true));
+//   }
+// };
+//
+// struct Exsleratev2SerializableAttr final
+//     : IREE::Encoding::SerializableAttr::ExternalModel<
+//           Exsleratev2SerializableAttr, Exsleratev2EncodingResolverAttr> {
+//
+//   bool isSerialized(Attribute attr) const {
+//     auto configuration =
+//         cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
+//     return configuration && configuration.contains(kEncodingInfoAttrName);
+//   }
+//
+//   Value calculateStorageSizeInBytes(Attribute attr, Location loc,
+//                                     OpBuilder &builder, RankedTensorType type,
+//                                     ValueRange dynamicDims) const {
+//     return calculatePackedStorageSizeInBytesImpl(attr, loc, builder, type,
+//                                                  dynamicDims);
+//   }
+// };
 
 } // namespace
 
@@ -1222,10 +1222,10 @@ void registerCPUEncodingExternalModels(DialectRegistry &registry) {
             VMVXEncodingPackedLayoutMaterializerAttr,
             VMVXEncodingResolverMaterializerAttr, VMVXLayoutResolverAttr,
             VMVXSerializableAttr, VMVXEncodingResolverVerifier>(*ctx);
-        IREE::CPU::Exsleratev2EncodingResolverAttr::attachInterface<
-            Exsleratev2EncodingPackedLayoutMaterializerAttr,
-            Exsleratev2EncodingResolverMaterializerAttr,
-            Exsleratev2LayoutResolverAttr, Exsleratev2SerializableAttr>(*ctx);
+        // IREE::CPU::Exsleratev2EncodingResolverAttr::attachInterface<
+        //     Exsleratev2EncodingPackedLayoutMaterializerAttr,
+        //     Exsleratev2EncodingResolverMaterializerAttr,
+        //     Exsleratev2LayoutResolverAttr, Exsleratev2SerializableAttr>(*ctx);
       });
 }
 

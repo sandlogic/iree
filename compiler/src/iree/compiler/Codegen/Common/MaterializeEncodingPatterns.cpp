@@ -300,7 +300,7 @@ static Value generateEncodingTransferOps(RewriterBase &rewriter, Value src,
   if (srcType.getEncoding()) {
     value = IREE::Encoding::UnsetEncodingOp::create(
         rewriter, src.getLoc(), srcType.dropEncoding(), value, dynamicDims,
-        /*encoding_dims=*/ValueRange{});
+        /*encoding_dims=*/{});
   }
   if (destType.getEncoding()) {
     value = IREE::Encoding::SetEncodingOp::create(
@@ -645,7 +645,7 @@ struct UnsetEncodingOpLoweringConversion
 class MaterializeLinalgOp
     : public OpInterfaceConversionPattern<linalg::LinalgOp> {
 public:
-  MaterializeContractionOp(
+  MaterializeLinalgOp(
       const MaterializeEncodingTypeConverter &typeConverter,
       MLIRContext *context, PatternBenefit benefit = 1)
       : OpInterfaceConversionPattern<linalg::LinalgOp>(typeConverter, context,
@@ -778,10 +778,8 @@ void populateMaterializeEncodingPatterns(
   });
 
   patterns.insert<
-      MaterializeContractionOp, MaterializeConvolutionOp,
+      MaterializeConvolutionOp,
       SetEncodingOpLoweringConversion, UnsetEncodingOpLoweringConversion,
-      MaterializeDPSOperation<linalg::FillOp>,
-      MaterializeDPSOperation<linalg::GenericOp>,
       MaterializeOperation<tensor::EmptyOp>, MaterializeOptimizationBarrierOp,
       MaterializeTensorExtDispatchTensorLoadOp,
       MaterializeTensorExtDispatchTensorStoreOp,
