@@ -159,6 +159,15 @@ void deserializeFromSLFb(const char* filename) {
       flatbuffers_string_t kernel_name =
           iree_exsleratev2_hal_exsleratev2_InputTileData_kernel_name(
               input_tile_data);
+      uint32_t input_tiled_buffer_size =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_input_tiled_buffer_size(
+              input_tile_data);
+      uint32_t input_offset =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_input_offset(
+              input_tile_data);
+      uint32_t output_offset =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_output_offset(
+              input_tile_data);
 
       printf("  InputTileData:\n");
       printf("    tile_height: %u\n", tile_h);
@@ -179,6 +188,9 @@ void deserializeFromSLFb(const char* filename) {
           break;
       }
       printf("    kernel_name: %s\n", kernel_name ? kernel_name : "(empty)");
+      printf("    input_tiled_buffer_size: %u\n", input_tiled_buffer_size);
+      printf("    input_offset: %u\n", input_offset);
+      printf("    output_offset: %u\n", output_offset);
     }
 
     iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers =
