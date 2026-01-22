@@ -79,6 +79,9 @@ table InputTileData {
     input_tile_width: uint32 = 0;  // Input data tile width (default 0)
     fallback_mode: FallBackMode = hardware; // hardware, skip or kernel
     kernel_name: string;      // name of kernel to fallback (default empty)
+    input_tiled_buffer_size: uint32 = 0; // Input tiled buffer size for allocation
+    input_offset: uint32 = 0;  // Input binding offset
+    output_offset: uint32 = 0; // Output binding offset
 }
 
 // Layer definition
