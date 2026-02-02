@@ -30,6 +30,41 @@ static SmallVector<Value> flattenValues(ArrayRef<ValueRange> values) {
   return vec;
 }
 
+// Helper: Apply custom tiling to tensor type to match hardware requirements.
+static RankedTensorType applyTilingToType(RankedTensorType type) {
+  const int64_t TILE_H = 8;
+  const int64_t TILE_W = 4;
+  const int64_t CHANNEL_SET_SIZE = 32;
+
+  int64_t rank = type.getRank();
+  if (rank < 2 || rank > 4) return type;
+
+  SmallVector<int64_t> tiledShape(type.getShape().begin(), type.getShape().end());
+  SmallVector<int64_t> tileSizes(rank, 1);
+
+  if (rank == 4) {
+    tileSizes[0] = 1;                // batch
+    tileSizes[1] = CHANNEL_SET_SIZE; // channels
+    tileSizes[2] = TILE_H;           // height
+    tileSizes[3] = TILE_W;           // width
+  } else if (rank == 3) {
+    tileSizes[0] = CHANNEL_SET_SIZE; // channels
+    tileSizes[1] = TILE_H;           // height
+    tileSizes[2] = TILE_W;           // width
+  } else if (rank == 2) {
+    tileSizes[0] = TILE_H;           // height
+    tileSizes[1] = TILE_W;           // width
+  }
+
+  for (int i = 0; i < rank; ++i) {
+    if (tiledShape[i] != ShapedType::kDynamic && tileSizes[i] > 1) {
+      tiledShape[i] = ((tiledShape[i] + tileSizes[i] - 1) / tileSizes[i]) * tileSizes[i];
+    }
+  }
+
+  return RankedTensorType::get(tiledShape, type.getElementType());
+}
+
 // Inserts a sizeof calculation for the given tensor value type and dims.
 // This should only be used to produce sizes for values produced by an op; the
 // size of operands must be queried from the input resource.
@@ -39,9 +74,51 @@ static Value buildResultSizeOf(Location loc, Value tensorValue,
                                ConversionPatternRewriter &rewriter) {
   // TODO(benvanik): see if we can stash this on the side to avoid expensive
   // materialization of a bunch of redundant IR.
+
+  // Apply custom tiling to tensor type to match buffer allocation
+  auto tensorType = tensorValue.getType();
+  if (auto rankedType = dyn_cast<RankedTensorType>(tensorType)) {
+    // For rank-1 tensors, check if they're reshaped to multi-dim tensors
+    // If so, use the reshape target type for tiling calculation
+    if (rankedType.getRank() == 1) {
+      for (auto user : tensorValue.getUsers()) {
+        if (auto reshapeOp = dyn_cast<IREE::Flow::TensorReshapeOp>(user)) {
+          if (reshapeOp.getSource() == tensorValue) {
+            auto reshapeResultType = reshapeOp.getResult().getType();
+            if (auto reshapeRankedType = dyn_cast<RankedTensorType>(reshapeResultType)) {
+              // Use the reshape target type for tiling, then compute flattened size
+              auto tiledReshapeType = applyTilingToType(reshapeRankedType);
+              if (auto tiledRanked = dyn_cast<RankedTensorType>(tiledReshapeType)) {
+                // Calculate flattened element count from tiled multi-dim shape
+                int64_t tiledElements = 1;
+                for (int64_t dim : tiledRanked.getShape()) {
+                  if (dim == ShapedType::kDynamic) {
+                    tiledElements = ShapedType::kDynamic;
+                    break;
+                  }
+                  tiledElements *= dim;
+                }
+                // Create flattened tiled type
+                if (tiledElements != ShapedType::kDynamic) {
+                  tensorType = RankedTensorType::get({tiledElements}, rankedType.getElementType());
+                } else {
+                  tensorType = tiledReshapeType;
+                }
+              }
+            }
+            break;
+          }
+        }
+      }
+    } else {
+      // For multi-dim tensors, apply tiling directly
+      tensorType = applyTilingToType(rankedType);
+    }
+  }
+
   return IREE::Stream::TensorSizeOfOp::create(
       rewriter, loc, rewriter.getIndexType(),
-      TypeAttr::get(tensorValue.getType()), dynamicDims, affinityAttr);
+      TypeAttr::get(tensorType), dynamicDims, affinityAttr);
 }
 
 struct ConvertTensorConstantOp
@@ -149,6 +226,9 @@ struct ConvertTensorCastLikeOp
         buildResultSizeOf(op.getLoc(), op.getResult(), op.getResultDims(),
                           resultAffinityAttr, rewriter);
     auto unknownType = rewriter.getType<IREE::Stream::ResourceType>();
+
+    // Don't apply tiling to clone types - use original types
+    // The result size from buildResultSizeOf already includes tiling
     Value cloneOp = IREE::Stream::TensorCloneOp::create(
         rewriter, op.getLoc(), unknownType, source.resource,
         op.getSource().getType(), op.getSourceDims(), source.resourceSize,
@@ -188,6 +268,9 @@ struct ConvertTensorEmptyOp
         buildResultSizeOf(op.getLoc(), op.getResult(), op.getResultDims(),
                           executionAffinityAttr, rewriter);
     auto unknownType = rewriter.getType<IREE::Stream::ResourceType>();
+
+    // Don't apply tiling - use original type
+    // buildResultSizeOf already calculates the tiled size
     auto emptyOp = IREE::Stream::TensorEmptyOp::create(
         rewriter, op.getLoc(), unknownType, op.getResult().getType(),
         flattenValues(adaptor.getResultDims()), resultSize,
@@ -208,6 +291,9 @@ struct ConvertTensorSplatOp
         buildResultSizeOf(op.getLoc(), op.getResult(), op.getResultDims(),
                           executionAffinityAttr, rewriter);
     auto unknownType = rewriter.getType<IREE::Stream::ResourceType>();
+
+    // Don't apply tiling - use original type
+    // buildResultSizeOf already calculates the tiled size
     auto splatOp = IREE::Stream::TensorSplatOp::create(
         rewriter, op.getLoc(), unknownType, adaptor.getValue().front(),
         op.getResult().getType(), flattenValues(adaptor.getResultDims()),
@@ -228,6 +314,8 @@ struct ConvertTensorCloneOp
                                           adaptor.getOperand(),
                                           executionAffinityAttr, rewriter);
     auto unknownType = rewriter.getType<IREE::Stream::ResourceType>();
+
+    // Don't apply tiling to clone types - use original types
     auto cloneOp = IREE::Stream::TensorCloneOp::create(
         rewriter, op.getLoc(), unknownType, operand.resource,
         op.getOperand().getType(), op.getOperandDims(), operand.resourceSize,
@@ -823,7 +911,13 @@ struct ConvertDispatchOp
         newOperand = newOperandCast.resource;
         operandSizes.push_back(newOperandCast.resourceSize);
         allOperandSizes.push_back(newOperandCast.resourceSize);
-        operandEncodings.push_back(oldOperand.getType());
+
+        // Apply tiling to operand type before storing in encoding
+        auto operandType = oldOperand.getType();
+        if (auto rankedType = dyn_cast<RankedTensorType>(operandType)) {
+          operandType = applyTilingToType(rankedType);
+        }
+        operandEncodings.push_back(operandType);
       } else {
         allOperandSizes.push_back({});
         operandEncodings.push_back(rewriter.getType<IREE::Util::UnusedType>());
@@ -854,11 +948,18 @@ struct ConvertDispatchOp
       } else {
         auto resultDynamicDims = IREE::Util::buildDynamicDimsForValue(
             op.getLoc(), result.value(), rewriter);
+
+        // Apply tiling to result type before storing
+        auto tiledResultType = oldResultType;
+        if (auto rankedType = dyn_cast<RankedTensorType>(oldResultType)) {
+          tiledResultType = applyTilingToType(rankedType);
+        }
+
         resultSizes.push_back(
             buildResultSizeOf(op.getLoc(), result.value(), resultDynamicDims,
                               executionAffinityAttr, rewriter));
         resultTypes.push_back(unknownType);
-        resultEncodings.push_back(oldResultType);
+        resultEncodings.push_back(tiledResultType);
       }
     }
 

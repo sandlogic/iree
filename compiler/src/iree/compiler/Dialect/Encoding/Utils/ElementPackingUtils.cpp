@@ -97,48 +97,106 @@ Value calculateStorageElementCountInBytes(Location loc,
                                           RankedTensorType shapedType,
                                           ValueRange dynamicDims,
                                           OpBuilder &builder) {
-  if (auto serializableEncodingAttr =
-          IREE::Encoding::getSerializableAttr(shapedType)) {
-    return serializableEncodingAttr.calculateStorageSizeInBytes(
-        loc, builder, shapedType, dynamicDims);
-  }
-
-  bool isPackedStorage = clEnableI1Support;
-  Type alignedElementType = legalizeStorageElementTypeImpl(
-      shapedType.getElementType(), isPackedStorage);
-  unsigned elementBits = IREE::Util::getTypeBitWidth(alignedElementType);
-
-  // Calculate all static dims first, if any.
-  int64_t staticCount = 1;
-  if (!needToPackSubByteElementBitWidthImpl(elementBits, isPackedStorage)) {
-    staticCount *= IREE::Util::getRoundedElementByteWidth(alignedElementType);
-  }
-
-  for (unsigned i = 0; i < shapedType.getRank(); ++i) {
-    if (!shapedType.isDynamicDim(i))
-      staticCount *= shapedType.getDimSize(i);
-  }
-  // Scale by dynamic dims, if present.
-  auto value =
-      arith::ConstantIndexOp::create(builder, loc, staticCount).getResult();
-  for (auto dim : dynamicDims) {
-    value = builder.createOrFold<arith::MulIOp>(loc, value, dim);
-  }
-  // Sub-byte packing requires putting multiple elements in the same byte.
-  if (needToPackSubByteElementBitWidthImpl(elementBits, isPackedStorage)) {
-    assert(8 % elementBits == 0);
-    unsigned byteElements = 8 / elementBits;
-    // TODO(antiagainst): We may want to emit runtime check to make sure this is
-    // divisible.
-    auto divisor = arith::ConstantIndexOp::create(builder, loc, byteElements);
-    if (!isPackedStorage && dynamicDims.empty() &&
-        (staticCount * elementBits) % 8 != 0) {
-      return nullptr;
+ if (auto serializableEncodingAttr =
+            IREE::Encoding::getSerializableAttr(shapedType)) {
+      return serializableEncodingAttr.calculateStorageSizeInBytes(
+          loc, builder, shapedType, dynamicDims);
     }
-    value = builder.createOrFold<arith::CeilDivUIOp>(loc, value, divisor);
-  }
 
-  return value;
+    
+
+    const int64_t TILE_H = 8;
+    const int64_t TILE_W = 4;
+    const int64_t CHANNEL_SET_SIZE = 32;
+ 
+
+    bool isPackedStorage = clEnableI1Support;
+    Type alignedElementType = legalizeStorageElementTypeImpl(
+        shapedType.getElementType(), isPackedStorage);
+    unsigned elementBits = IREE::Util::getTypeBitWidth(alignedElementType);
+
+    // Calculate all static dims first, if any.
+    int64_t staticCount = 1;
+    if (!needToPackSubByteElementBitWidthImpl(elementBits, isPackedStorage)) {
+      staticCount *= IREE::Util::getRoundedElementByteWidth(alignedElementType);
+    }
+
+    int64_t rank = shapedType.getRank();
+    for (unsigned i = 0; i < rank; ++i) {
+      if (!shapedType.isDynamicDim(i)) {
+        int64_t dimSize = shapedType.getDimSize(i);
+
+        
+        int64_t tileSize = 1;
+        if (rank == 4) {
+          if (i == 1) tileSize = CHANNEL_SET_SIZE;
+          else if (i == 2) tileSize = TILE_H;
+          else if (i == 3) tileSize = TILE_W;
+        } else if (rank == 3) {
+          if (i == 0) tileSize = CHANNEL_SET_SIZE;
+          else if (i == 1) tileSize = TILE_H;
+          else if (i == 2) tileSize = TILE_W;
+        } else if (rank == 2) {
+          if (i == 0) tileSize = TILE_H;
+          else if (i == 1) tileSize = TILE_W;
+        }
+
+        
+        int64_t tiledDim = ((dimSize + tileSize - 1) / tileSize) * tileSize;
+        staticCount *= tiledDim;
+      }
+    }
+
+    // Scale by dynamic dims, if present.
+    auto value =
+        arith::ConstantIndexOp::create(builder, loc, staticCount).getResult();
+
+    unsigned dynamicDimIdx = 0;
+    for (unsigned i = 0; i < rank; ++i) {
+      if (shapedType.isDynamicDim(i)) {
+        Value dim = dynamicDims[dynamicDimIdx++];
+
+        // Apply tiling to dynamic dimensions
+        int64_t tileSize = 1;
+        if (rank == 4) {
+          if (i == 1) tileSize = CHANNEL_SET_SIZE;
+          else if (i == 2) tileSize = TILE_H;
+          else if (i == 3) tileSize = TILE_W;
+        } else if (rank == 3) {
+          if (i == 0) tileSize = CHANNEL_SET_SIZE;
+          else if (i == 1) tileSize = TILE_H;
+          else if (i == 2) tileSize = TILE_W;
+        } else if (rank == 2) {
+          if (i == 0) tileSize = TILE_H;
+          else if (i == 1) tileSize = TILE_W;
+        }
+
+        if (tileSize > 1) {
+          Value tileSizeVal = arith::ConstantIndexOp::create(builder, loc, tileSize);
+          Value tileSizeMinus1 = arith::ConstantIndexOp::create(builder, loc, tileSize - 1);
+          Value sum = builder.createOrFold<arith::AddIOp>(loc, dim, tileSizeMinus1);
+          Value divided = builder.createOrFold<arith::DivUIOp>(loc, sum, tileSizeVal);
+          dim = builder.createOrFold<arith::MulIOp>(loc, divided, tileSizeVal);
+        }
+
+        value = builder.createOrFold<arith::MulIOp>(loc, value, dim);
+      }
+    }
+
+    // Sub-byte packing requires putting multiple elements in the same byte.
+    if (needToPackSubByteElementBitWidthImpl(elementBits, isPackedStorage)) {
+      assert(8 % elementBits == 0);
+      unsigned byteElements = 8 / elementBits;
+      auto divisor = arith::ConstantIndexOp::create(builder, loc, byteElements);
+      if (!isPackedStorage && dynamicDims.empty() &&
+          (staticCount * elementBits) % 8 != 0) {
+        return nullptr;
+      }
+      value = builder.createOrFold<arith::CeilDivUIOp>(loc, value, divisor);
+    }
+
+    return value;
+
 }
 
 Value calculateStorageElementOffsetInBytes(Location loc,
