@@ -68,11 +68,18 @@ Value calculateStorageElementCountInBytes(Location loc,
                                           RankedTensorType shapedType,
                                           ValueRange dynamicDims,
                                           OpBuilder &builder) {
-  if (auto serializableEncodingAttr =
-          IREE::Encoding::getSerializableAttr(shapedType)) {
-    return serializableEncodingAttr.calculateStorageSizeInBytes(
-        loc, builder, shapedType, dynamicDims);
-  }
+ if (auto serializableEncodingAttr =
+            IREE::Encoding::getSerializableAttr(shapedType)) {
+      return serializableEncodingAttr.calculateStorageSizeInBytes(
+          loc, builder, shapedType, dynamicDims);
+    }
+
+    
+
+    const int64_t TILE_H = 8;
+    const int64_t TILE_W = 4;
+    const int64_t CHANNEL_SET_SIZE = 32;
+ 
 
   Type alignedElementType = legalizeStorageElementType(shapedType);
   unsigned elementBits = IREE::Util::getTypeBitWidth(alignedElementType);
@@ -110,7 +117,8 @@ Value calculateStorageElementCountInBytes(Location loc,
     value = builder.createOrFold<arith::CeilDivUIOp>(loc, value, divisor);
   }
 
-  return value;
+    return value;
+
 }
 
 Value calculateStorageElementOffsetInBytes(Location loc,
