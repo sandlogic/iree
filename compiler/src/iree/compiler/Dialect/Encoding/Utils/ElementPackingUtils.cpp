@@ -108,12 +108,14 @@ Value calculateStorageElementCountInBytes(Location loc,
     const int64_t TILE_H = 8;
     const int64_t TILE_W = 4;
     const int64_t CHANNEL_SET_SIZE = 32;
- 
 
     bool isPackedStorage = clEnableI1Support;
     Type alignedElementType = legalizeStorageElementTypeImpl(
         shapedType.getElementType(), isPackedStorage);
     unsigned elementBits = IREE::Util::getTypeBitWidth(alignedElementType);
+
+    // Only apply tiling for i8 (signed int8) tensors
+    bool shouldApplyTiling = shapedType.getElementType().isInteger(8);
 
     // Calculate all static dims first, if any.
     int64_t staticCount = 1;
@@ -122,26 +124,29 @@ Value calculateStorageElementCountInBytes(Location loc,
     }
 
     int64_t rank = shapedType.getRank();
+
     for (unsigned i = 0; i < rank; ++i) {
       if (!shapedType.isDynamicDim(i)) {
         int64_t dimSize = shapedType.getDimSize(i);
 
-        
+        // Only apply tiling for i8 tensors
         int64_t tileSize = 1;
-        if (rank == 4) {
-          if (i == 1) tileSize = CHANNEL_SET_SIZE;
-          else if (i == 2) tileSize = TILE_H;
-          else if (i == 3) tileSize = TILE_W;
-        } else if (rank == 3) {
-          if (i == 0) tileSize = CHANNEL_SET_SIZE;
-          else if (i == 1) tileSize = TILE_H;
-          else if (i == 2) tileSize = TILE_W;
-        } else if (rank == 2) {
-          if (i == 0) tileSize = TILE_H;
-          else if (i == 1) tileSize = TILE_W;
+        if (shouldApplyTiling) {
+          if (rank == 4) {
+            if (i == 1) tileSize = CHANNEL_SET_SIZE;
+            else if (i == 2) tileSize = TILE_H;
+            else if (i == 3) tileSize = TILE_W;
+          } else if (rank == 3) {
+            if (i == 0) tileSize = CHANNEL_SET_SIZE;
+            else if (i == 1) tileSize = TILE_H;
+            else if (i == 2) tileSize = TILE_W;
+          } else if (rank == 2) {
+            // MatMul: [M, N] -> only last dim (N) tiled to 32
+            if (i == 1) tileSize = CHANNEL_SET_SIZE;
+            // dim[0] (M) stays unchanged
+          }
         }
 
-        
         int64_t tiledDim = ((dimSize + tileSize - 1) / tileSize) * tileSize;
         staticCount *= tiledDim;
       }
@@ -156,19 +161,22 @@ Value calculateStorageElementCountInBytes(Location loc,
       if (shapedType.isDynamicDim(i)) {
         Value dim = dynamicDims[dynamicDimIdx++];
 
-        // Apply tiling to dynamic dimensions
+        // Only apply tiling to dynamic dimensions for i8 tensors
         int64_t tileSize = 1;
-        if (rank == 4) {
-          if (i == 1) tileSize = CHANNEL_SET_SIZE;
-          else if (i == 2) tileSize = TILE_H;
-          else if (i == 3) tileSize = TILE_W;
-        } else if (rank == 3) {
-          if (i == 0) tileSize = CHANNEL_SET_SIZE;
-          else if (i == 1) tileSize = TILE_H;
-          else if (i == 2) tileSize = TILE_W;
-        } else if (rank == 2) {
-          if (i == 0) tileSize = TILE_H;
-          else if (i == 1) tileSize = TILE_W;
+        if (shouldApplyTiling) {
+          if (rank == 4) {
+            if (i == 1) tileSize = CHANNEL_SET_SIZE;
+            else if (i == 2) tileSize = TILE_H;
+            else if (i == 3) tileSize = TILE_W;
+          } else if (rank == 3) {
+            if (i == 0) tileSize = CHANNEL_SET_SIZE;
+            else if (i == 1) tileSize = TILE_H;
+            else if (i == 2) tileSize = TILE_W;
+          } else if (rank == 2) {
+            // MatMul: [M, N] -> only last dim (N) tiled to 32
+            if (i == 1) tileSize = CHANNEL_SET_SIZE;
+            // dim[0] (M) stays unchanged
+          }
         }
 
         if (tileSize > 1) {
