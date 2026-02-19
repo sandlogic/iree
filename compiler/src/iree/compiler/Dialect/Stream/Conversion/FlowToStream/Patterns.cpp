@@ -31,7 +31,13 @@ static SmallVector<Value> flattenValues(ArrayRef<ValueRange> values) {
 }
 
 // Helper: Apply custom tiling to tensor type to match hardware requirements.
+// Only applies to i8 (si8) tensors for hardware alignment.
 static RankedTensorType applyTilingToType(RankedTensorType type) {
+  // Only tile i8 (signed int8) tensors - f32 and other types stay unchanged
+  auto elementType = type.getElementType();
+  if (!elementType.isInteger(8))
+    return type;
+
   const int64_t TILE_H = 8;
   const int64_t TILE_W = 4;
   const int64_t CHANNEL_SET_SIZE = 32;
@@ -52,8 +58,9 @@ static RankedTensorType applyTilingToType(RankedTensorType type) {
     tileSizes[1] = TILE_H;           // height
     tileSizes[2] = TILE_W;           // width
   } else if (rank == 2) {
-    tileSizes[0] = TILE_H;           // height
-    tileSizes[1] = TILE_W;           // width
+    // MatMul: [M, N] -> only last dim (N) tiled to 32
+    tileSizes[0] = 1;                      // M stays unchanged
+    tileSizes[1] = CHANNEL_SET_SIZE;       // N -> 32
   }
 
   for (int i = 0; i < rank; ++i) {
