@@ -1,6 +1,5 @@
 // Exslerate V2 Schema
 // This schema defines the serialization format for neural network models
-
 namespace iree.exsleratev2.hal.exsleratev2;
 
 // Value type for register configurations
@@ -17,9 +16,9 @@ enum DataCategory : uint8 {
     output = 3,         // Output activation data
     atomic_bank = 4,    // Atomic operation bank definitions
     atomic_offset = 5,  // Atomic operation offset values
-    lifetime = 6    ,    // Lifetime information for buffers
-    bnweight = 7 ,
-    bnbias = 8 ,
+    lifetime = 6,       // Lifetime information for buffers
+    bnweight = 7,
+    bnbias = 8,
     lut = 9
 }
 
@@ -38,7 +37,6 @@ table RegisterValue {
     memrefdef_id: uint32;   // Reference to MemRefDef ID if value_type is MemRefDef
     csr_id: uint32;
 }
-
 
 // Define specific buffer types for different data categories
 table Int8Buffer {
@@ -66,10 +64,10 @@ table DataBufferDef {
     buffer: BufferData;      // The actual buffer data with appropriate type
 }
 
-// FallBack mode enum
-enum FallBackMode : uint8 {
-    hardware = 0,
-    kernel = 1,
+// Execution mode enum
+enum ExecutionMode : uint8 {
+    exslerate = 0,
+    cpu = 1,
     skip = 2
 }
 
@@ -77,11 +75,9 @@ enum FallBackMode : uint8 {
 table InputTileData {
     input_tile_height: uint32 = 0; // Input data tile height (default 0)
     input_tile_width: uint32 = 0;  // Input data tile width (default 0)
-    fallback_mode: FallBackMode = hardware; // hardware, skip or kernel
-    kernel_name: string;      // name of kernel to fallback (default empty)
-    input_tiled_buffer_size: uint32 = 0; // Input tiled buffer size for allocation
-    input_offset: uint32 = 0;  // Input binding offset
-    output_offset: uint32 = 0; // Output binding offset
+    execution_mode: ExecutionMode = exslerate; // exslerate, cpu, or skip
+    kernel_name: string;      // name of kernel for CPU execution (default empty)
+    input_tiled_buffer_size: uint32 =  0; // Input tiled buffer size for allocation
 }
 
 // Layer definition
@@ -90,6 +86,11 @@ table LayerDef {
     data_buffers: [DataBufferDef]; // Layer's static data (weights, bias, etc.)
     mem_ref_defs: [MemRefDef];     // Memory metadata for inputs, outputs, etc.
     input_tile_data: InputTileData; // Changed from array to single object
+    input_tile_buf: uint32 = 0;
+    input_offset: uint32 = 0;
+    output_offset: uint32 = 0;
+    num_channel: uint32 = 0;
+    num_filter: uint32 = 0;
 }
 
 // Main executable definition

@@ -84,6 +84,24 @@ void deserializeFromSLFb(const char* filename) {
             iree_exsleratev2_hal_exsleratev2_LayerDef_input_tile_data(layer);
     printf("  input_tile_data ptr=%p\n", (void*)input_tile_data_check);
 
+    uint32_t input_tile_buf =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_input_tile_buf(layer);
+    uint32_t input_offset =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_input_offset(layer);
+    uint32_t output_offset =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_output_offset(layer);
+    uint32_t num_channel =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_num_channel(layer);
+    uint32_t num_filter =
+        iree_exsleratev2_hal_exsleratev2_LayerDef_num_filter(layer);
+
+    printf("\n  Layer Scalar Fields:\n");
+    printf("    input_tile_buf: %u\n", input_tile_buf);
+    printf("    input_offset: %u\n", input_offset);
+    printf("    output_offset: %u\n", output_offset);
+    printf("    num_channel: %u\n", num_channel);
+    printf("    num_filter: %u\n\n", num_filter);
+
     if (csr_configs) {
       size_t csr_count =
           iree_exsleratev2_hal_exsleratev2_RegisterValue_vec_len(csr_configs);
@@ -130,9 +148,9 @@ void deserializeFromSLFb(const char* filename) {
                data_type, alignment, shape);
 
         printf("    Shape: [");
-        for (size_t i = 0; i < shape; ++i) {
-          printf("%d", shape_ptr[i]);
-          if (i < shape - 1) {
+        for (size_t k = 0; k < shape; ++k) {
+          printf("%d", shape_ptr[k]);
+          if (k < shape - 1) {
             printf(", ");
           }
         }
@@ -154,25 +172,16 @@ void deserializeFromSLFb(const char* filename) {
           iree_exsleratev2_hal_exsleratev2_InputTileData_input_tile_width(
               input_tile_data);
       uint8_t fallback_mode =
-          iree_exsleratev2_hal_exsleratev2_InputTileData_fallback_mode(
+          iree_exsleratev2_hal_exsleratev2_InputTileData_execution_mode(
               input_tile_data);
       flatbuffers_string_t kernel_name =
           iree_exsleratev2_hal_exsleratev2_InputTileData_kernel_name(
-              input_tile_data);
-      uint32_t input_tiled_buffer_size =
-          iree_exsleratev2_hal_exsleratev2_InputTileData_input_tiled_buffer_size(
-              input_tile_data);
-      uint32_t input_offset =
-          iree_exsleratev2_hal_exsleratev2_InputTileData_input_offset(
-              input_tile_data);
-      uint32_t output_offset =
-          iree_exsleratev2_hal_exsleratev2_InputTileData_output_offset(
               input_tile_data);
 
       printf("  InputTileData:\n");
       printf("    tile_height: %u\n", tile_h);
       printf("    tile_width: %u\n", tile_w);
-      printf("    fallback_mode: %u ", fallback_mode);
+      printf("    execution_mode: %u ", fallback_mode);
       switch (fallback_mode) {
         case 0:
           printf("(hardware)\n");
@@ -188,9 +197,6 @@ void deserializeFromSLFb(const char* filename) {
           break;
       }
       printf("    kernel_name: %s\n", kernel_name ? kernel_name : "(empty)");
-      printf("    input_tiled_buffer_size: %u\n", input_tiled_buffer_size);
-      printf("    input_offset: %u\n", input_offset);
-      printf("    output_offset: %u\n", output_offset);
     }
 
     iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers =
@@ -212,37 +218,55 @@ void deserializeFromSLFb(const char* filename) {
 
         switch (category) {
           case 0: {
-            printf("    %zu: category=%u\n", j, category);
+            printf("    %zu: category=%u (filter)\n", j, category);
             auto int8_buffer =
                 (iree_exsleratev2_hal_exsleratev2_Int8Buffer_table_t)buffer;
             flatbuffers_int8_vec_t data =
                 iree_exsleratev2_hal_exsleratev2_Int8Buffer_data(int8_buffer);
 
             printf("      Int8Buffer (%zu): [", flatbuffers_int8_vec_len(data));
-            for (size_t i = 0; i < flatbuffers_int8_vec_len(data); i++) {
-              printf("%d ", flatbuffers_int8_vec_at(data, i));
+            for (size_t k = 0; k < flatbuffers_int8_vec_len(data); k++) {
+              printf("%d ", flatbuffers_int8_vec_at(data, k));
             }
             printf("]\n");
             break;
-          }  // filter data
+          }
 
           case 1: {
-            printf("    %zu: category=%u\n", j, category);
+            printf("    %zu: category=%u (bias)\n", j, category);
+
             auto int32_buffer =
                 (iree_exsleratev2_hal_exsleratev2_Int32Buffer_table_t)buffer;
             flatbuffers_int32_vec_t data =
                 iree_exsleratev2_hal_exsleratev2_Int32Buffer_data(int32_buffer);
 
-            printf("Int32Buffer (%zu): [", flatbuffers_int32_vec_len(data));
-            for (size_t i = 0; i < flatbuffers_int32_vec_len(data); i++) {
-              printf("%d ", flatbuffers_int32_vec_at(data, i));
+            printf("      Int32Buffer (%zu): [",
+                   flatbuffers_int32_vec_len(data));
+            for (size_t k = 0; k < flatbuffers_int32_vec_len(data); k++) {
+              printf("%d ", flatbuffers_int32_vec_at(data, k));
             }
             printf("]\n");
             break;
-          }  // bias data
+          }
+
+          case 8: {
+            printf("    %zu: category=%u (batchnorm)\n", j, category);
+            auto int32_buffer =
+                (iree_exsleratev2_hal_exsleratev2_Int32Buffer_table_t)buffer;
+            flatbuffers_int32_vec_t data =
+                iree_exsleratev2_hal_exsleratev2_Int32Buffer_data(int32_buffer);
+
+            printf("      Int32Buffer (%zu): [",
+                   flatbuffers_int32_vec_len(data));
+            for (size_t k = 0; k < flatbuffers_int32_vec_len(data); k++) {
+              printf("%d ", flatbuffers_int32_vec_at(data, k));
+            }
+            printf("]\n");
+            break;
+          }
 
           case 4: {
-            printf("    %zu: category=%u\n", j, category);
+            printf("    %zu: category=%u (atomicBank)\n", j, category);
             auto uint32_buffer =
                 (iree_exsleratev2_hal_exsleratev2_Uint32Buffer_table_t)buffer;
             flatbuffers_uint32_vec_t data =
@@ -251,15 +275,15 @@ void deserializeFromSLFb(const char* filename) {
 
             printf("      Uint32Buffer (%zu): [",
                    flatbuffers_uint32_vec_len(data));
-            for (size_t i = 0; i < flatbuffers_uint32_vec_len(data); i++) {
-              printf("%u ", flatbuffers_uint32_vec_at(data, i));
+            for (size_t k = 0; k < flatbuffers_uint32_vec_len(data); k++) {
+              printf("%u ", flatbuffers_uint32_vec_at(data, k));
             }
             printf("]\n");
             break;
-          }  // atomicBank
+          }
 
           case 5: {
-            printf("    %zu: category=%u\n", j, category);
+            printf("    %zu: category=%u (atomicOffset)\n", j, category);
             auto uint32_buffer =
                 (iree_exsleratev2_hal_exsleratev2_Uint32Buffer_table_t)buffer;
             flatbuffers_uint32_vec_t data =
@@ -268,15 +292,15 @@ void deserializeFromSLFb(const char* filename) {
 
             printf("      Uint32Buffer (%zu): [",
                    flatbuffers_uint32_vec_len(data));
-            for (size_t i = 0; i < flatbuffers_uint32_vec_len(data); i++) {
-              printf("%u ", flatbuffers_uint32_vec_at(data, i));
+            for (size_t k = 0; k < flatbuffers_uint32_vec_len(data); k++) {
+              printf("%u ", flatbuffers_uint32_vec_at(data, k));
             }
             printf("]\n");
             break;
-          }  // atomicOffset
+          }
 
           case 6: {
-            printf("    %zu: category=%u\n", j, category);
+            printf("    %zu: category=%u (lifetime)\n", j, category);
             auto uint32_buffer =
                 (iree_exsleratev2_hal_exsleratev2_Uint32Buffer_table_t)buffer;
             flatbuffers_uint32_vec_t data =
@@ -285,15 +309,16 @@ void deserializeFromSLFb(const char* filename) {
 
             printf("      Uint32Buffer (%zu): [",
                    flatbuffers_uint32_vec_len(data));
-            for (size_t i = 0; i < flatbuffers_uint32_vec_len(data); i++) {
-              printf("%u ", flatbuffers_uint32_vec_at(data, i));
+            for (size_t k = 0; k < flatbuffers_uint32_vec_len(data); k++) {
+              printf("%u ", flatbuffers_uint32_vec_at(data, k));
             }
             printf("]\n");
             break;
-          }  // lifetime
+          }
 
           default:
-            printf("[WARN] Unknown DataBuffer category %u\n", category);
+            printf("    %zu: category=%u [WARN] Unknown DataBuffer category\n",
+                   j, category);
             break;
         }
       }
