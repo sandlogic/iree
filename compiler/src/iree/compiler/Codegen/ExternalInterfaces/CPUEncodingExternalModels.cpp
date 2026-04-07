@@ -308,7 +308,7 @@ TileNxHxWxC chooseConvTile(const SmallVector<TileNxHxWxC> &tiles) {
   return tiles.front();
 }
 
-Operation * lowerContractionOpWithEncoding(
+Operation *lowerContractionOpWithEncoding(
     OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
     IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
   if (!linalgOp.hasPureTensorSemantics()) {
@@ -403,16 +403,18 @@ Operation * lowerContractionOpWithEncoding(
 //     return failure();
 //   }
 //
-//   if (inputEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_LHS ||
-//       filterEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_RHS ||
-//       resultEncoding.getOperandIndex().getValue() !=
+//   if (inputEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_LHS
+//   ||
+//       filterEncoding.getOperandIndex().getValue() != IREE::Encoding::CONV_RHS
+//       || resultEncoding.getOperandIndex().getValue() !=
 //           IREE::Encoding::CONV_RESULT) {
 //     return failure();
 //   }
 //
 //   MaterializeEncodingInfo encodingInfo = {};
 //   if (auto packedLayoutAttr =
-//           dyn_cast<IREE::Codegen::PackedLayoutMaterializerAttr>(layoutAttr)) {
+//           dyn_cast<IREE::Codegen::PackedLayoutMaterializerAttr>(layoutAttr))
+//           {
 //     encodingInfo = packedLayoutAttr.getEncodingInfo(
 //         cast<RankedTensorType>(linalgOp->getResultTypes()[0]));
 //   }
@@ -1124,7 +1126,8 @@ struct VMVXEncodingResolverVerifier
 //     }
 //
 //     SmallVector<TileNxHxWxC> enumeratedTileNxHxWxC =
-//         enumerateExsleratev2ConvTiles(encoding, layoutAttr.getConfiguration());
+//         enumerateExsleratev2ConvTiles(encoding,
+//         layoutAttr.getConfiguration());
 //     if (enumeratedTileNxHxWxC.empty()) {
 //       return info;
 //     }
@@ -1191,8 +1194,8 @@ struct VMVXEncodingResolverVerifier
 //   }
 //
 //   Value calculateStorageSizeInBytes(Attribute attr, Location loc,
-//                                     OpBuilder &builder, RankedTensorType type,
-//                                     ValueRange dynamicDims) const {
+//                                     OpBuilder &builder, RankedTensorType
+//                                     type, ValueRange dynamicDims) const {
 //     return calculatePackedStorageSizeInBytesImpl(attr, loc, builder, type,
 //                                                  dynamicDims);
 //   }
@@ -1214,7 +1217,8 @@ void registerCPUEncodingExternalModels(DialectRegistry &registry) {
         // IREE::CPU::Exsleratev2EncodingResolverAttr::attachInterface<
         //     Exsleratev2EncodingPackedLayoutMaterializerAttr,
         //     Exsleratev2EncodingResolverMaterializerAttr,
-        //     Exsleratev2LayoutResolverAttr, Exsleratev2SerializableAttr>(*ctx);
+        //     Exsleratev2LayoutResolverAttr,
+        //     Exsleratev2SerializableAttr>(*ctx);
       });
 }
 

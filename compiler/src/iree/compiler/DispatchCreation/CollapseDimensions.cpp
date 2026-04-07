@@ -1109,13 +1109,18 @@ collapseDimensionsForDispatch(IRRewriter &rewriter,
         llvm::TypeSwitch<Operation *, ResultsType>(opToCollapse)
             .Case<linalg::LinalgOp>(
                 [&, &info = info](auto genericOp) -> ResultsType {
-                  FailureOr<linalg::CollapseResult> maybeReplacements =
+                  FailureOr<linalg::CollapseResult> maybeCollapseResult =
                       mlir::linalg::collapseOpIterationDims(
                           genericOp, info.getReassocation(), rewriter);
-                  if (failed(maybeReplacements)) {
+                  if (failed(maybeCollapseResult)) {
                     return failure();
                   }
-                  return maybeReplacements->results;
+                  if (Attribute tileSelectAttr =
+                          genericOp->getAttr("exsleratev2.tile_select")) {
+                    maybeCollapseResult->collapsedOp->setAttr(
+                        "exsleratev2.tile_select", tileSelectAttr);
+                  }
+                  return maybeCollapseResult->results;
                 })
             .Case<IREE::LinalgExt::AttentionOp>(
                 [&, &info = info](auto attentionOp) -> ResultsType {

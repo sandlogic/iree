@@ -645,9 +645,8 @@ struct UnsetEncodingOpLoweringConversion
 class MaterializeLinalgOp
     : public OpInterfaceConversionPattern<linalg::LinalgOp> {
 public:
-  MaterializeLinalgOp(
-      const MaterializeEncodingTypeConverter &typeConverter,
-      MLIRContext *context, PatternBenefit benefit = 1)
+  MaterializeLinalgOp(const MaterializeEncodingTypeConverter &typeConverter,
+                      MLIRContext *context, PatternBenefit benefit = 1)
       : OpInterfaceConversionPattern<linalg::LinalgOp>(typeConverter, context,
                                                        benefit) {}
 
@@ -775,13 +774,13 @@ void populateMaterializeEncodingPatterns(
                          isRankedTensorTypeWithEncoding);
   });
 
-  patterns.insert<
-      MaterializeConvolutionOp,
-      SetEncodingOpLoweringConversion, UnsetEncodingOpLoweringConversion,
-      MaterializeOperation<tensor::EmptyOp>, MaterializeOptimizationBarrierOp,
-      MaterializeTensorExtDispatchTensorLoadOp,
-      MaterializeTensorExtDispatchTensorStoreOp,
-      MaterializeInterfaceBindingEncoding, MaterializeFuncReturnOp>(
+  patterns.insert<MaterializeConvolutionOp, SetEncodingOpLoweringConversion,
+                  UnsetEncodingOpLoweringConversion,
+                  MaterializeOperation<tensor::EmptyOp>,
+                  MaterializeOptimizationBarrierOp,
+                  MaterializeTensorExtDispatchTensorLoadOp,
+                  MaterializeTensorExtDispatchTensorStoreOp,
+                  MaterializeInterfaceBindingEncoding, MaterializeFuncReturnOp>(
       typeConverter, context);
 };
 

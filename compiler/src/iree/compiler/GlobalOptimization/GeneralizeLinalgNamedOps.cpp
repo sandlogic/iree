@@ -95,6 +95,8 @@ void GeneralizeLinalgNamedOpsPass::runOnOperation() {
       }
     }
 
+    Attribute tileSelectAttr = linalgOp->getAttr("exsleratev2.tile_select");
+
     FailureOr<linalg::GenericOp> generalizedOp =
         linalg::generalizeNamedOp(rewriter, linalgOp);
     if (failed(generalizedOp)) {
@@ -104,6 +106,9 @@ void GeneralizeLinalgNamedOpsPass::runOnOperation() {
 
     if (paddingAttr) {
       generalizedOp.value()->setAttr("exsleratev2.padding", paddingAttr);
+    }
+    if (tileSelectAttr) {
+      generalizedOp.value()->setAttr("exsleratev2.tile_select", tileSelectAttr);
     }
   }
 }

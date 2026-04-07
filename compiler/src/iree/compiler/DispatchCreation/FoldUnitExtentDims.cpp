@@ -497,6 +497,24 @@ void FoldUnitExtentDimsPass::runOnOperation() {
     }
   });
 
+  // Save exsleratev2.tile_select attrs from generic ops before unit-dim
+  // folding. FoldUnitExtentDims creates new generic ops (e.g., stripping
+  // batch=1 from conv/pool ops) without copying discardable attrs. We map the
+  // pre-fold result RankedTensorType → tile_select so we can restore after
+  // folding.
+  llvm::SmallVector<std::pair<RankedTensorType, Attribute>> tileSelectEntries;
+  moduleOp.walk([&](linalg::GenericOp genericOp) {
+    if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp))
+      return;
+    Attribute tileSelectAttr = genericOp->getAttr("exsleratev2.tile_select");
+    if (!tileSelectAttr)
+      return;
+    for (OpResult result : genericOp->getResults()) {
+      if (auto tensorType = dyn_cast<RankedTensorType>(result.getType()))
+        tileSelectEntries.emplace_back(tensorType, tileSelectAttr);
+    }
+  });
+
   linalg::ControlDropUnitDims options = getControlDropUnitDimsOptions();
   // Apply fold unit extent dims patterns with walk-based driver.
   {
@@ -512,6 +530,39 @@ void FoldUnitExtentDimsPass::runOnOperation() {
     if (failed(applyPatternsGreedily(moduleOp, std::move(patterns)))) {
       return signalPassFailure();
     }
+  }
+
+  // Restore exsleratev2.tile_select on generic ops whose leading unit batch
+  // dimension was folded away. For each new generic op missing the attr, look
+  // for a saved entry whose pre-fold type matches the post-fold type with the
+  // unit leading dimension prepended.
+  if (!tileSelectEntries.empty()) {
+    moduleOp.walk([&](linalg::GenericOp genericOp) {
+      if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp))
+        return;
+      if (genericOp->hasAttr("exsleratev2.tile_select"))
+        return;
+      for (OpResult result : genericOp->getResults()) {
+        auto newType = dyn_cast<RankedTensorType>(result.getType());
+        if (!newType)
+          continue;
+        for (auto &[savedType, attr] : tileSelectEntries) {
+          ArrayRef<int64_t> savedShape = savedType.getShape();
+          ArrayRef<int64_t> newShape = newType.getShape();
+          // Match: saved type is the pre-fold type with leading 1 stripped.
+          if (savedShape.size() != newShape.size() + 1)
+            continue;
+          if (savedShape[0] != 1)
+            continue;
+          if (savedShape.drop_front() != newShape)
+            continue;
+          if (savedType.getElementType() != newType.getElementType())
+            continue;
+          genericOp->setAttr("exsleratev2.tile_select", attr);
+          return;
+        }
+      }
+    });
   }
 }
 
