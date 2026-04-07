@@ -1113,26 +1113,32 @@ collapseDimensionsForDispatch(IRRewriter &rewriter,
     using ResultsType = FailureOr<SmallVector<Value>>;
     auto maybeReplacements =
         llvm::TypeSwitch<Operation *, ResultsType>(opToCollapse)
-            .Case([&, &info = info](linalg::LinalgOp genericOp) -> ResultsType {
-              FailureOr<linalg::CollapseResult> maybeReplacements =
-                  mlir::linalg::collapseOpIterationDims(
-                      genericOp, info.getReassociation(), rewriter);
-              if (failed(maybeReplacements)) {
-                return failure();
-              }
-              return maybeReplacements->results;
-            })
-            .Case([&, &info = info](
-                      IREE::LinalgExt::AttentionOp attentionOp) -> ResultsType {
-              FailureOr<IREE::LinalgExt::CollapseResult> maybeReplacements =
-                  IREE::LinalgExt::collapseOpIterationDims(
-                      attentionOp, info.getReassociation(), rewriter);
-              if (failed(maybeReplacements)) {
-                return failure();
-              }
-              return maybeReplacements->results;
-            })
-            .Case([](tensor::EmptyOp) {
+            .Case<linalg::LinalgOp>(
+                [&, &info = info](auto genericOp) -> ResultsType {
+                  FailureOr<linalg::CollapseResult> maybeCollapseResult =
+                      mlir::linalg::collapseOpIterationDims(
+                          genericOp, info.getReassocation(), rewriter);
+                  if (failed(maybeCollapseResult)) {
+                    return failure();
+                  }
+                  if (Attribute tileSelectAttr =
+                          genericOp->getAttr("exsleratev2.tile_select")) {
+                    maybeCollapseResult->collapsedOp->setAttr(
+                        "exsleratev2.tile_select", tileSelectAttr);
+                  }
+                  return maybeCollapseResult->results;
+                })
+            .Case<IREE::LinalgExt::AttentionOp>(
+                [&, &info = info](auto attentionOp) -> ResultsType {
+                  FailureOr<IREE::LinalgExt::CollapseResult> maybeReplacements =
+                      IREE::LinalgExt::collapseOpIterationDims(
+                          attentionOp, info.getReassocation(), rewriter);
+                  if (failed(maybeReplacements)) {
+                    return failure();
+                  }
+                  return maybeReplacements->results;
+                })
+            .Case<tensor::EmptyOp>([](tensor::EmptyOp) {
               // No need to do anything. It will be folded with reshapes.
               return failure();
             })

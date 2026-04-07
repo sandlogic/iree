@@ -91,7 +91,8 @@ propagateThroughEncodingCastableOp(
     }
     // Otherwise, we need to create a new set_encoding op.
     auto setEncodingOp = IREE::Encoding::SetEncodingOp::create(
-        builder, op->getLoc(), encodedOperandType, operand, /*encodingDims=*/ValueRange{});
+        builder, op->getLoc(), encodedOperandType, operand,
+        /*encodingDims=*/ValueRange{});
     encodedOperands.push_back(setEncodingOp.getResult());
     result.generatedEncodingOps.push_back(setEncodingOp);
   }

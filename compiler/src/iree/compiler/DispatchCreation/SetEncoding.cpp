@@ -40,12 +40,13 @@ static Value setEncoding(OpBuilder &builder, Location loc, Value source,
                          Attribute encodingAttr, ValueRange encodingDims = {}) {
   auto resultType =
       cast<RankedTensorType>(source.getType()).cloneWithEncoding(encodingAttr);
-  return IREE::Encoding::SetEncodingOp::create(builder, loc, resultType,
-                                               source, encodingDims);
+  return IREE::Encoding::SetEncodingOp::create(builder, loc, resultType, source,
+                                               encodingDims);
 };
 
 static Value unsetEncoding(OpBuilder &builder, Location loc, Value source,
-                           SmallVector<OpFoldResult> sizes, ValueRange encodingDims = {}) {
+                           SmallVector<OpFoldResult> sizes,
+                           ValueRange encodingDims = {}) {
   SmallVector<Value> dynamicSizesVec;
   SmallVector<int64_t> staticSizesVec;
   dispatchIndexOpFoldResults(sizes, dynamicSizesVec, staticSizesVec);
@@ -54,7 +55,8 @@ static Value unsetEncoding(OpBuilder &builder, Location loc, Value source,
   auto unsetEncodingReturnType =
       RankedTensorType::get(sourceType.getShape(), sourceType.getElementType());
   return IREE::Encoding::UnsetEncodingOp::create(
-      builder, loc, unsetEncodingReturnType, source, dynamicSizesVec, encodingDims);
+      builder, loc, unsetEncodingReturnType, source, dynamicSizesVec,
+      encodingDims);
 }
 
 /// Given a LinalgOp and one of its OpOperands, return the element type,
@@ -89,7 +91,8 @@ static Value unsetEncoding(OpBuilder &builder, Location loc, Value source,
 //   auto elemType = getElementTypeOrSelf(operand->get().getType());
 //   // Infer if unsigned from body ops
 //   Value blockArg = linalgOp.getMatchingBlockArgument(operand);
-//   for (auto bodyCastOp : blockArg.getParentBlock()->getOps<arith::ExtUIOp>()) {
+//   for (auto bodyCastOp : blockArg.getParentBlock()->getOps<arith::ExtUIOp>())
+//   {
 //     if (bodyCastOp->getOperand(0) == blockArg) {
 //       return builder.getIntegerType(elemType.getIntOrFloatBitWidth(),
 //                                     /*isSigned=*/false);
@@ -224,16 +227,19 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
   //   encodedInputOperands.push_back(setEncodingWrapper(
   //       linalgOp.getDpsInputs()[1], IREE::Encoding::SCALED_MATMUL_RHS));
   //   encodedInputOperands.push_back(setEncodingWrapper(
-  //       linalgOp.getDpsInputs()[2], IREE::Encoding::SCALED_MATMUL_LHS_SCALES));
+  //       linalgOp.getDpsInputs()[2],
+  //       IREE::Encoding::SCALED_MATMUL_LHS_SCALES));
   //   encodedInputOperands.push_back(setEncodingWrapper(
-  //       linalgOp.getDpsInputs()[3], IREE::Encoding::SCALED_MATMUL_RHS_SCALES));
+  //       linalgOp.getDpsInputs()[3],
+  //       IREE::Encoding::SCALED_MATMUL_RHS_SCALES));
   //   encodedInitOperand = setEncodingWrapper(
   //       linalgOp.getDpsInits()[0], IREE::Encoding::SCALED_MATMUL_RESULT);
   // }
   // SmallVector<Value> encodedOperands(encodedInputOperands);
   // encodedOperands.push_back(encodedInitOperand);
   // Value opTiled =
-  //     clone(rewriter, linalgOp, encodedInitOperand.getType(), encodedOperands)
+  //     clone(rewriter, linalgOp, encodedInitOperand.getType(),
+  //     encodedOperands)
   //         ->getResult(0);
 
   // // Sizes are computed by original output size.

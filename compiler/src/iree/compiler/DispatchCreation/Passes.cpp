@@ -52,8 +52,8 @@ static llvm::cl::opt<bool> clExperimentalMultiUseEncodingFusion(
 
 static llvm::cl::opt<bool> clDisableCollapseDimensions(
     "iree-dispatch-creation-disable-collapse-dimensions",
-    llvm::cl::desc(
-        "Disable collapsing dimensions of linalg ops (preserves spatial dims for tiling)"),
+    llvm::cl::desc("Disable collapsing dimensions of linalg ops (preserves "
+                   "spatial dims for tiling)"),
     llvm::cl::init(false));
 
 static llvm::cl::opt<DispatchCreation::EncodingOptions> clSetEncodingStrategy(
@@ -250,7 +250,8 @@ static void addDispatchRegionCreationPasses(OpPassManager &passManager,
             CloneProducersIntoDispatchRegionsPassOptions{
                 options.enableAggressiveFusion});
       })
-      // Collapse dimensions of linalg Ops (skip if disabled for tiling preservation).
+      // Collapse dimensions of linalg Ops (skip if disabled for tiling
+      // preservation).
       .addPredicatedPass(!clDisableCollapseDimensions,
                          DispatchCreation::createCollapseDimensionsPass)
       // Hoist scalar compute introduced from collapsing dimensions to

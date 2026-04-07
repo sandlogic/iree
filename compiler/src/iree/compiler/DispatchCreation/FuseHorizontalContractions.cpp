@@ -427,6 +427,9 @@ fuseContractionsHorizontally(RewriterBase &rewriter, Location loc,
       rewriter, loc, fusedResultTypes, fusedIns, fusedOuts, fusedIndexingMaps,
       fusedIteratorTypes, [](OpBuilder &, Location, ValueRange) {});
 
+  if (auto tsa = linalgOps.front()->getAttr("exsleratev2.tile_select"))
+    fusedOp->setAttr("exsleratev2.tile_select", tsa);
+
   Block *fusedBody = fusedOp.getBlock();
   int64_t rhsIndex = 0;
   int64_t outsIndex = fusedOp.getNumDpsInputs();

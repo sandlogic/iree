@@ -477,8 +477,8 @@ bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp) {
 //   int count = 0;
 
 //   for (auto expr : inputMap.getResults()) {
-//     //  patter for :  (parallel  * const +reduction  ) or (parallel+ reduction)
-//     if (auto addexpr = dyn_cast<AffineBinaryOpExpr>(expr)) {
+//     //  patter for :  (parallel  * const +reduction  ) or (parallel+
+//     reduction) if (auto addexpr = dyn_cast<AffineBinaryOpExpr>(expr)) {
 
 //       if (addexpr.getKind() == AffineExprKind::Add) {
 
@@ -548,10 +548,9 @@ bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp) {
 //     return detail::MatchEXSLTiledConvolutionResult::OutputDimsNotParallel;
 //   }
 
-//   auto genericOp = dyn_cast<mlir::linalg::GenericOp>(linalgOp.getOperation());
-//   Block &body = genericOp.getRegion().front();
-//   bool hasmul = false;
-//   bool hasadd = false;
+//   auto genericOp =
+//   dyn_cast<mlir::linalg::GenericOp>(linalgOp.getOperation()); Block &body =
+//   genericOp.getRegion().front(); bool hasmul = false; bool hasadd = false;
 
 //   for (auto &op : body.getOperations()) {
 //     if (isa<arith::MulIOp>(op))
@@ -578,8 +577,9 @@ bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp) {
 // }
 
 // FailureOr<linalg::ConvolutionDimensions> inferConvolutionDimsImpl(
-//     ArrayRef<AffineMap> indexingMaps, ArrayRef<utils::IteratorType> iterators,
-//     ConvAccessExprWalker &inputExprWalker, bool allowEmptyConvolvedDims) {
+//     ArrayRef<AffineMap> indexingMaps, ArrayRef<utils::IteratorType>
+//     iterators, ConvAccessExprWalker &inputExprWalker, bool
+//     allowEmptyConvolvedDims) {
 //   if (indexingMaps.size() < 3) {
 //     return failure();
 //   }

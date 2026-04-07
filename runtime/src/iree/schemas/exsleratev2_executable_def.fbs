@@ -78,6 +78,8 @@ table InputTileData {
     execution_mode: ExecutionMode = exslerate; // exslerate, cpu, or skip
     kernel_name: string;      // name of kernel for CPU execution (default empty)
     input_tiled_buffer_size: uint32 =  0; // Input tiled buffer size for allocation
+    output_tile_height: uint32 = 0; // Output tile height for CPU kernels
+    output_tile_width: uint32 = 0;  // Output tile width for CPU kernels
 }
 
 // Layer definition

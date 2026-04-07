@@ -43,9 +43,11 @@ static RankedTensorType applyTilingToType(RankedTensorType type) {
   const int64_t CHANNEL_SET_SIZE = 32;
 
   int64_t rank = type.getRank();
-  if (rank < 2 || rank > 4) return type;
+  if (rank < 2 || rank > 4)
+    return type;
 
-  SmallVector<int64_t> tiledShape(type.getShape().begin(), type.getShape().end());
+  SmallVector<int64_t> tiledShape(type.getShape().begin(),
+                                  type.getShape().end());
   SmallVector<int64_t> tileSizes(rank, 1);
 
   if (rank == 4) {
@@ -59,13 +61,14 @@ static RankedTensorType applyTilingToType(RankedTensorType type) {
     tileSizes[2] = TILE_W;           // width
   } else if (rank == 2) {
     // MatMul: [M, N] -> only last dim (N) tiled to 32
-    tileSizes[0] = 1;                      // M stays unchanged
-    tileSizes[1] = CHANNEL_SET_SIZE;       // N -> 32
+    tileSizes[0] = 1;                // M stays unchanged
+    tileSizes[1] = CHANNEL_SET_SIZE; // N -> 32
   }
 
   for (int i = 0; i < rank; ++i) {
     if (tiledShape[i] != ShapedType::kDynamic && tileSizes[i] > 1) {
-      tiledShape[i] = ((tiledShape[i] + tileSizes[i] - 1) / tileSizes[i]) * tileSizes[i];
+      tiledShape[i] =
+          ((tiledShape[i] + tileSizes[i] - 1) / tileSizes[i]) * tileSizes[i];
     }
   }
 
@@ -85,33 +88,20 @@ static Value buildResultSizeOf(Location loc, Value tensorValue,
   // Apply custom tiling to tensor type to match buffer allocation
   auto tensorType = tensorValue.getType();
   if (auto rankedType = dyn_cast<RankedTensorType>(tensorType)) {
-    // For rank-1 tensors, check if they're reshaped to multi-dim tensors
-    // If so, use the reshape target type for tiling calculation
+    // For rank-1 tensors, check if they're reshaped to multi-dim tensors.
+    // Use the reshape target's multi-dim tiled type directly (not a flattened
+    // rank-1) so that calculateStorageElementCountInBytes can apply dynamic
+    // tile sizes from the registry.  A rank-1 sizeof bypasses the registry
+    // because the registry only checks rank >= 3 tensors.
     if (rankedType.getRank() == 1) {
       for (auto user : tensorValue.getUsers()) {
         if (auto reshapeOp = dyn_cast<IREE::Flow::TensorReshapeOp>(user)) {
           if (reshapeOp.getSource() == tensorValue) {
             auto reshapeResultType = reshapeOp.getResult().getType();
-            if (auto reshapeRankedType = dyn_cast<RankedTensorType>(reshapeResultType)) {
-              // Use the reshape target type for tiling, then compute flattened size
-              auto tiledReshapeType = applyTilingToType(reshapeRankedType);
-              if (auto tiledRanked = dyn_cast<RankedTensorType>(tiledReshapeType)) {
-                // Calculate flattened element count from tiled multi-dim shape
-                int64_t tiledElements = 1;
-                for (int64_t dim : tiledRanked.getShape()) {
-                  if (dim == ShapedType::kDynamic) {
-                    tiledElements = ShapedType::kDynamic;
-                    break;
-                  }
-                  tiledElements *= dim;
-                }
-                // Create flattened tiled type
-                if (tiledElements != ShapedType::kDynamic) {
-                  tensorType = RankedTensorType::get({tiledElements}, rankedType.getElementType());
-                } else {
-                  tensorType = tiledReshapeType;
-                }
-              }
+            if (auto reshapeRankedType =
+                    dyn_cast<RankedTensorType>(reshapeResultType)) {
+              // Use the multi-dim tiled type so the registry can be consulted.
+              tensorType = applyTilingToType(reshapeRankedType);
             }
             break;
           }
@@ -124,8 +114,8 @@ static Value buildResultSizeOf(Location loc, Value tensorValue,
   }
 
   return IREE::Stream::TensorSizeOfOp::create(
-      rewriter, loc, rewriter.getIndexType(),
-      TypeAttr::get(tensorType), dynamicDims, affinityAttr);
+      rewriter, loc, rewriter.getIndexType(), TypeAttr::get(tensorType),
+      dynamicDims, affinityAttr);
 }
 
 struct ConvertTensorConstantOp
