@@ -80,6 +80,10 @@ table InputTileData {
     input_tiled_buffer_size: uint32 =  0; // Input tiled buffer size for allocation
     output_tile_height: uint32 = 0; // Output tile height for CPU kernels
     output_tile_width: uint32 = 0;  // Output tile width for CPU kernels
+    quant_scale: float = 0.0;      // Quantization scale for elementwise ops
+    quant_zero_point: int32 = 0;   // Quantization zero point for elementwise ops
+    leaky_relu_alpha: float = 0.0;  // Leaky relu alpha (0 = standard relu path)
+    requant_output_scale: float = 0.0; // Requantization scale after leaky relu
 }
 
 // Layer definition

@@ -1117,7 +1117,7 @@ collapseDimensionsForDispatch(IRRewriter &rewriter,
                 [&, &info = info](auto genericOp) -> ResultsType {
                   FailureOr<linalg::CollapseResult> maybeCollapseResult =
                       mlir::linalg::collapseOpIterationDims(
-                          genericOp, info.getReassocation(), rewriter);
+                          genericOp, info.getReassociation(), rewriter);
                   if (failed(maybeCollapseResult)) {
                     return failure();
                   }
@@ -1132,7 +1132,7 @@ collapseDimensionsForDispatch(IRRewriter &rewriter,
                 [&, &info = info](auto attentionOp) -> ResultsType {
                   FailureOr<IREE::LinalgExt::CollapseResult> maybeReplacements =
                       IREE::LinalgExt::collapseOpIterationDims(
-                          attentionOp, info.getReassocation(), rewriter);
+                          attentionOp, info.getReassociation(), rewriter);
                   if (failed(maybeReplacements)) {
                     return failure();
                   }

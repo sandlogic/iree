@@ -35,16 +35,18 @@ static SmallVector<Value> flattenValues(ArrayRef<ValueRange> values) {
 static RankedTensorType applyTilingToType(RankedTensorType type) {
   // Only tile i8 (signed int8) tensors - f32 and other types stay unchanged
   auto elementType = type.getElementType();
-  if (!elementType.isInteger(8))
+  if (!elementType.isInteger(8)) {
     return type;
+  }
 
   const int64_t TILE_H = 8;
   const int64_t TILE_W = 4;
   const int64_t CHANNEL_SET_SIZE = 32;
 
   int64_t rank = type.getRank();
-  if (rank < 2 || rank > 4)
+  if (rank < 2 || rank > 4) {
     return type;
+  }
 
   SmallVector<int64_t> tiledShape(type.getShape().begin(),
                                   type.getShape().end());

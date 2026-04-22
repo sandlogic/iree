@@ -52,6 +52,30 @@ static Type getContractionInputTypeWithSignedness(OpBuilder &builder,
   return elemType;
 }
 
+// Given a LinalgOp and one of its OpOperands, return the element type,
+// inferring unsignedness from the body of the LinalgOp
+static Type getConvolutionInputTypeWithSignedness(OpBuilder &builder,
+                                                  linalg::LinalgOp linalgOp,
+                                                  OpOperand *operand) {
+  assert(linalg::isaConvolutionOpInterface(linalgOp));
+  assert(operand->getOwner() == linalgOp.getOperation());
+  auto elemType = getElementTypeOrSelf(operand->get().getType());
+  Value blockArg = linalgOp.getMatchingBlockArgument(operand);
+  for (auto bodyOp : blockArg.getParentBlock()->getOps<arith::ExtUIOp>()) {
+    if (bodyOp->getOperand(0) == blockArg) {
+      return builder.getIntegerType(elemType.getIntOrFloatBitWidth(),
+                                    /*isSigned=*/false);
+    }
+  }
+  for (auto bodyOp : blockArg.getParentBlock()->getOps<arith::ExtSIOp>()) {
+    if (bodyOp->getOperand(0) == blockArg) {
+      return builder.getIntegerType(elemType.getIntOrFloatBitWidth(),
+                                    /*isSigned=*/true);
+    }
+  }
+  return elemType;
+}
+
 /// Extract dynamic dimension values for a linalg operation in loop order.
 /// Returns values only for dimensions that are dynamic.
 static SmallVector<Value> getDynamicLoopDims(OpBuilder &builder,
@@ -143,6 +167,31 @@ SerializableAttr::getEncodingProperties(Operation *op) {
     props.operands.push_back(addEncoding(SCALED_MATMUL_RHS_SCALES));
     props.inits.push_back(addEncoding(SCALED_MATMUL_RESULT));
 
+    return props;
+  }
+
+  // Return encoding properties for convolution operations.
+  if (linalg::isaConvolutionOpInterface(linalgOp)) {
+    auto convDims = linalg::inferConvolutionDims(linalgOp);
+    if (failed(convDims) || convDims->outputImage.size() != 2) {
+      return failure();
+    }
+    Type lhsElemType = getConvolutionInputTypeWithSignedness(
+        builder, linalgOp, linalgOp.getDpsInputOperand(0));
+    Type rhsElemType = getConvolutionInputTypeWithSignedness(
+        builder, linalgOp, linalgOp.getDpsInputOperand(1));
+    Type outElemType = getConvolutionInputTypeWithSignedness(
+        builder, linalgOp, linalgOp.getDpsInitOperand(0));
+    if (!lhsElemType || !rhsElemType || !outElemType) {
+      return failure();
+    }
+
+    elemTypes = {lhsElemType, rhsElemType, outElemType};
+    opType = EncodingOpType::conv;
+
+    props.operands.push_back(addEncoding(CONV_LHS));
+    props.operands.push_back(addEncoding(CONV_RHS));
+    props.inits.push_back(addEncoding(CONV_RESULT));
     return props;
   }
 

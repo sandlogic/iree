@@ -40,7 +40,6 @@ iree_cc_library(
     "Passes.h"
     "Utils.h"
   SRCS
-    # "ApplyCustomTensorTiling.cpp"
     "CleanupNumericNarrowing.cpp"
     "ConvertConv2DToImg2Col.cpp"
     "ConvertStridedContractionToContraction.cpp"

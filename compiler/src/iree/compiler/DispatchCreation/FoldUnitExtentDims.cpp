@@ -503,14 +503,17 @@ void FoldUnitExtentDimsPass::runOnOperation() {
   // folding.
   llvm::SmallVector<std::pair<RankedTensorType, Attribute>> tileSelectEntries;
   moduleOp.walk([&](linalg::GenericOp genericOp) {
-    if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp))
+    if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp)) {
       return;
+    }
     Attribute tileSelectAttr = genericOp->getAttr("exsleratev2.tile_select");
-    if (!tileSelectAttr)
+    if (!tileSelectAttr) {
       return;
+    }
     for (OpResult result : genericOp->getResults()) {
-      if (auto tensorType = dyn_cast<RankedTensorType>(result.getType()))
+      if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
         tileSelectEntries.emplace_back(tensorType, tileSelectAttr);
+      }
     }
   });
 
@@ -537,26 +540,33 @@ void FoldUnitExtentDimsPass::runOnOperation() {
   // unit leading dimension prepended.
   if (!tileSelectEntries.empty()) {
     moduleOp.walk([&](linalg::GenericOp genericOp) {
-      if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp))
+      if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp)) {
         return;
-      if (genericOp->hasAttr("exsleratev2.tile_select"))
+      }
+      if (genericOp->hasAttr("exsleratev2.tile_select")) {
         return;
+      }
       for (OpResult result : genericOp->getResults()) {
         auto newType = dyn_cast<RankedTensorType>(result.getType());
-        if (!newType)
+        if (!newType) {
           continue;
+        }
         for (auto &[savedType, attr] : tileSelectEntries) {
           ArrayRef<int64_t> savedShape = savedType.getShape();
           ArrayRef<int64_t> newShape = newType.getShape();
           // Match: saved type is the pre-fold type with leading 1 stripped.
-          if (savedShape.size() != newShape.size() + 1)
+          if (savedShape.size() != newShape.size() + 1) {
             continue;
-          if (savedShape[0] != 1)
+          }
+          if (savedShape[0] != 1) {
             continue;
-          if (savedShape.drop_front() != newShape)
+          }
+          if (savedShape.drop_front() != newShape) {
             continue;
-          if (savedType.getElementType() != newType.getElementType())
+          }
+          if (savedType.getElementType() != newType.getElementType()) {
             continue;
+          }
           genericOp->setAttr("exsleratev2.tile_select", attr);
           return;
         }

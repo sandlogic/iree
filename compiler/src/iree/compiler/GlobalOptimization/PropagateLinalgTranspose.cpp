@@ -251,8 +251,9 @@ public:
         rewriter, genericOp.getLoc(), resultTypes, genericOp.getDpsInputs(),
         newInit, newIndexingMaps, genericOp.getIteratorTypesArray(),
         /*bodyBuild=*/nullptr, linalg::getPrunedAttributeList(genericOp));
-    if (auto tsa = genericOp->getAttr("exsleratev2.tile_select"))
+    if (auto tsa = genericOp->getAttr("exsleratev2.tile_select")) {
       newGenericOp->setAttr("exsleratev2.tile_select", tsa);
+    }
     rewriter.cloneRegionBefore(genericOp.getRegion(), newGenericOp.getRegion(),
                                newGenericOp.getRegion().begin());
 

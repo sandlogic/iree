@@ -59,6 +59,12 @@ void PropagateDispatchConfigPass::runOnOperation() {
     if (!countRegion.empty()) {
       Block &configBlock = configOp.getBody().front();
       Block *exportBlock = exportOp.getWorkgroupCountBody();
+      if (configBlock.getNumArguments() == 0 &&
+          exportBlock->getNumArguments() != 0) {
+        SmallVector<Location> argLocs(exportBlock->getNumArguments(),
+                                      configOp.getLoc());
+        configBlock.addArguments(exportBlock->getArgumentTypes(), argLocs);
+      }
       TypeRange configArgTypes = configBlock.getArgumentTypes();
       TypeRange exportArgTypes = exportBlock->getArgumentTypes();
       if (configArgTypes != exportArgTypes) {

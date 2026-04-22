@@ -177,6 +177,18 @@ void deserializeFromSLFb(const char* filename) {
       flatbuffers_string_t kernel_name =
           iree_exsleratev2_hal_exsleratev2_InputTileData_kernel_name(
               input_tile_data);
+      float quant_scale =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_quant_scale(
+              input_tile_data);
+      int32_t quant_zero_point =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_quant_zero_point(
+              input_tile_data);
+      float leaky_relu_alpha =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_leaky_relu_alpha(
+              input_tile_data);
+      float requant_output_scale =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_requant_output_scale(
+              input_tile_data);
 
       printf("  InputTileData:\n");
       printf("    tile_height: %u\n", tile_h);
@@ -197,6 +209,10 @@ void deserializeFromSLFb(const char* filename) {
           break;
       }
       printf("    kernel_name: %s\n", kernel_name ? kernel_name : "(empty)");
+      printf("    quant_scale: %f\n", quant_scale);
+      printf("    quant_zero_point: %d\n", quant_zero_point);
+      printf("    leaky_relu_alpha: %f\n", leaky_relu_alpha);
+      printf("    requant_output_scale: %f\n", requant_output_scale);
     }
 
     iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers =

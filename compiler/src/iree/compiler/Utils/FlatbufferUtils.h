@@ -105,8 +105,9 @@ public:
 
   template <typename RangeTy>
   flatbuffers_int8_vec_ref_t createInt8Vec(RangeTy &&Range) {
-    if (Range.empty())
+    if (Range.empty()) {
       return 0;
+    }
     flatbuffers_int8_vec_start(*this);
     for (int8_t v : Range) {
       flatbuffers_int8_vec_push_create(*this, v);
@@ -116,8 +117,9 @@ public:
 
   template <typename RangeTy>
   flatbuffers_uint32_vec_ref_t createUInt32Vec(RangeTy &&Range) {
-    if (Range.empty())
+    if (Range.empty()) {
       return 0;
+    }
     flatbuffers_uint32_vec_start(*this);
     for (uint32_t v : Range) {
       flatbuffers_uint32_vec_push_create(*this, v);

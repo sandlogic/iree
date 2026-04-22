@@ -51,6 +51,12 @@ Value calculateStorageElementOffsetInBytes(Location loc,
 void registerExsleratev2TileSizes(int64_t C, int64_t H, int64_t W,
                                   int64_t tileH, int64_t tileW);
 
+/// Registers the packed byte size for a flattened rank-2 alias of an i8
+/// activation tensor. This preserves storage size across reshape/collapse from
+/// tiled CHW tensors to CxHW views.
+void registerExsleratev2FlattenedShapeBytes(int64_t dim0, int64_t dim1,
+                                            int64_t bytes);
+
 /// Clears all registered tile sizes.  Call at the start of each compilation
 /// to prevent stale entries from a previous run leaking into the next.
 void clearExsleratev2TileSizes();

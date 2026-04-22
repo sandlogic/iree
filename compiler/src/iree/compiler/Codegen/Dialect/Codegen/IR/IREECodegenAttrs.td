@@ -33,6 +33,8 @@ def EXSLERATEV2_Pool
 def EXSLERATEV2_MatMul
     : I32EnumAttrCase<"Exsleratev2MatMul", 1003>;
 
+def EXSLERATEV2_Reduce
+    : I32EnumAttrCase<"Exsleratev2Reduce", 1005>;
 
 def None : I32EnumAttrCase<"None", 0xffff>;
 
@@ -55,6 +57,8 @@ def DispatchLoweringPassPipelineEnum : I32EnumAttr<
     EXSLERATEV2_MatMul,
 
     EXSLERATEV2_Pool,
+
+    EXSLERATEV2_Reduce,
 
     // None to specify no in-built pipelines to use.
     None
