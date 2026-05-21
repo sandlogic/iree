@@ -131,6 +131,12 @@ static bool isSupportedConvolutionOp(linalg::LinalgOp linalgOp) {
   if (convDims->outputImage.empty() || convDims->filterLoop.empty()) {
     return false;
   }
+
+  // Pool ops have no channel mixing (inputChannel and outputChannel are empty).
+  // Only annotate true convolutions that have both IC and OC dimensions.
+  if (convDims->inputChannel.empty() || convDims->outputChannel.empty()) {
+    return false;
+  }
   return true;
 }
 
@@ -191,9 +197,13 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
       return WalkResult::interrupt();
     }
     auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
-    if (linalgOp && (isSupportedContractionOp(linalgOp) ||
-                     isSupportedScaledContractionOp(linalgOp) ||
-                     isSupportedConvolutionOp(linalgOp))) {
+    // if (linalgOp && (isSupportedContractionOp(linalgOp) ||
+    //                  isSupportedScaledContractionOp(linalgOp) ||
+    //                  isSupportedConvolutionOp(linalgOp))) {
+    //   candidates.push_back(op);
+    //   return WalkResult::advance();
+    // }
+    if (linalgOp && isSupportedConvolutionOp(linalgOp)) {
       candidates.push_back(op);
       return WalkResult::advance();
     }

@@ -84,6 +84,17 @@ table InputTileData {
     quant_zero_point: int32 = 0;   // Quantization zero point for elementwise ops
     leaky_relu_alpha: float = 0.0;  // Leaky relu alpha (0 = standard relu path)
     requant_output_scale: float = 0.0; // Requantization scale after leaky relu
+    dequant_scale: float = 0.0;   // Dequantization scale (output activation scale) for conv+leaky dispatches
+    output_byte_size: uint64 = 0; // Total output buffer bytes for elementwise ops; derived from tensor type at compile time
+    // Element type of the output tensor for CPU compiled dispatches.
+    // 0 = int8, 1 = float32, 2 = int32. Derived from tensor type at compile time.
+    output_element_type: uint8 = 0;
+    // Workgroup counts for compiled CPU dispatches (linalg.pack tiling).
+    // Set by ExsleratevCompileCpuPrograms from the packed output outer dims.
+    // 0 means not set; runtime defaults to 1.
+    cpu_workgroup_count_x: uint32 = 0;
+    cpu_workgroup_count_y: uint32 = 0;
+    cpu_workgroup_count_z: uint32 = 0;
 }
 
 // Layer definition
@@ -103,6 +114,8 @@ table LayerDef {
 table ExecutableDef {
     entry_points: [string];        // Named entry points into the model
     layers: [LayerDef];            // Each layer's configurations and data
+    cpu_code: [uint8];             // NEW: Compiled AArch64 .so bytes
+    cpu_function_name: string;     // NEW: dlsym target, e.g. "dispatch_fn"
 }
 
 // Root type declaration

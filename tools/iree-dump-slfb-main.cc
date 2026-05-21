@@ -46,6 +46,19 @@ void deserializeFromSLFb(const char* filename) {
     }
   }
 
+  flatbuffers_uint8_vec_t cpu_code =
+      iree_exsleratev2_hal_exsleratev2_ExecutableDef_cpu_code(executable);
+  if (cpu_code) {
+    printf("CPU Code size: %zu bytes\n", flatbuffers_uint8_vec_len(cpu_code));
+  }
+
+  const char* cpu_func_name =
+      iree_exsleratev2_hal_exsleratev2_ExecutableDef_cpu_function_name(
+          executable);
+  if (cpu_func_name) {
+    printf("CPU Function Name: %s\n", cpu_func_name);
+  }
+
   iree_exsleratev2_hal_exsleratev2_LayerDef_vec_t layers =
       iree_exsleratev2_hal_exsleratev2_ExecutableDef_layers(executable);
   if (!layers) {
@@ -155,9 +168,6 @@ void deserializeFromSLFb(const char* filename) {
           }
         }
         printf("]\n");
-
-        printf("    %zu: id=%u, type=%d, alignment=%u\n", j, id, data_type,
-               alignment);
       }
     }
 
@@ -170,6 +180,15 @@ void deserializeFromSLFb(const char* filename) {
               input_tile_data);
       uint32_t tile_w =
           iree_exsleratev2_hal_exsleratev2_InputTileData_input_tile_width(
+              input_tile_data);
+      uint32_t out_tile_h =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_output_tile_height(
+              input_tile_data);
+      uint32_t out_tile_w =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_output_tile_width(
+              input_tile_data);
+      uint32_t input_tiled_buffer_size =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_input_tiled_buffer_size(
               input_tile_data);
       uint8_t fallback_mode =
           iree_exsleratev2_hal_exsleratev2_InputTileData_execution_mode(
@@ -189,17 +208,26 @@ void deserializeFromSLFb(const char* filename) {
       float requant_output_scale =
           iree_exsleratev2_hal_exsleratev2_InputTileData_requant_output_scale(
               input_tile_data);
+      float dequant_scale =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_dequant_scale(
+              input_tile_data);
+      uint64_t output_byte_size =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_output_byte_size(
+              input_tile_data);
 
       printf("  InputTileData:\n");
-      printf("    tile_height: %u\n", tile_h);
-      printf("    tile_width: %u\n", tile_w);
+      printf("    input_tile_height: %u\n", tile_h);
+      printf("    input_tile_width: %u\n", tile_w);
+      printf("    output_tile_height: %u\n", out_tile_h);
+      printf("    output_tile_width: %u\n", out_tile_w);
+      printf("    input_tiled_buffer_size: %u\n", input_tiled_buffer_size);
       printf("    execution_mode: %u ", fallback_mode);
       switch (fallback_mode) {
         case 0:
           printf("(hardware)\n");
           break;
         case 1:
-          printf("(kernel)\n");
+          printf("(cpu)\n");
           break;
         case 2:
           printf("(skip)\n");
@@ -213,6 +241,19 @@ void deserializeFromSLFb(const char* filename) {
       printf("    quant_zero_point: %d\n", quant_zero_point);
       printf("    leaky_relu_alpha: %f\n", leaky_relu_alpha);
       printf("    requant_output_scale: %f\n", requant_output_scale);
+      printf("    dequant_scale: %f\n", dequant_scale);
+      printf("    output_byte_size: %lu\n", output_byte_size);
+      uint32_t cpu_wg_x =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_cpu_workgroup_count_x(
+              input_tile_data);
+      uint32_t cpu_wg_y =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_cpu_workgroup_count_y(
+              input_tile_data);
+      uint32_t cpu_wg_z =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_cpu_workgroup_count_z(
+              input_tile_data);
+      printf("    cpu_workgroup_count: [%u, %u, %u]\n", cpu_wg_x, cpu_wg_y,
+             cpu_wg_z);
     }
 
     iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers =
@@ -241,10 +282,10 @@ void deserializeFromSLFb(const char* filename) {
                 iree_exsleratev2_hal_exsleratev2_Int8Buffer_data(int8_buffer);
 
             printf("      Int8Buffer (%zu): [", flatbuffers_int8_vec_len(data));
-            // for (size_t k = 0; k < flatbuffers_int8_vec_len(data); k++) {
-            //   printf("%d ", flatbuffers_int8_vec_at(data, k));
-            // }
-            // printf("]\n");
+            for (size_t k = 0; k < flatbuffers_int8_vec_len(data); k++) {
+              printf("%d ", flatbuffers_int8_vec_at(data, k));
+            }
+            printf("]\n");
             break;
           }
 
@@ -256,28 +297,46 @@ void deserializeFromSLFb(const char* filename) {
             flatbuffers_int32_vec_t data =
                 iree_exsleratev2_hal_exsleratev2_Int32Buffer_data(int32_buffer);
 
-            printf("      Int32Buffer (%zu): [",
-                   flatbuffers_int32_vec_len(data));
-            // for (size_t k = 0; k < flatbuffers_int32_vec_len(data); k++) {
-            //   printf("%d ", flatbuffers_int32_vec_at(data, k));
-            // }
-            // printf("]\n");
+            printf("      Int32Buffer (%zu): [", flatbuffers_int32_vec_len(data));
+            for (size_t k = 0; k < flatbuffers_int32_vec_len(data); k++) {
+              printf("%d ", flatbuffers_int32_vec_at(data, k));
+            }
+            printf("]\n");
+            break;
+          }
+
+          case 2: {
+            printf("    %zu: category=%u (input)\n", j, category);
+            break;
+          }
+
+          case 3: {
+            printf("    %zu: category=%u (output)\n", j, category);
             break;
           }
 
           case 8: {
-            printf("    %zu: category=%u (batchnorm)\n", j, category);
+            printf("    %zu: category=%u (bnbias)\n", j, category);
             auto int32_buffer =
                 (iree_exsleratev2_hal_exsleratev2_Int32Buffer_table_t)buffer;
             flatbuffers_int32_vec_t data =
                 iree_exsleratev2_hal_exsleratev2_Int32Buffer_data(int32_buffer);
 
-            printf("      Int32Buffer (%zu): [",
-                   flatbuffers_int32_vec_len(data));
+            printf("      Int32Buffer (%zu): [", flatbuffers_int32_vec_len(data));
             for (size_t k = 0; k < flatbuffers_int32_vec_len(data); k++) {
               printf("%d ", flatbuffers_int32_vec_at(data, k));
             }
             printf("]\n");
+            break;
+          }
+
+          case 7: {
+            printf("    %zu: category=%u (bnweight)\n", j, category);
+            break;
+          }
+
+          case 9: {
+            printf("    %zu: category=%u (lut)\n", j, category);
             break;
           }
 

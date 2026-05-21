@@ -653,14 +653,7 @@ public:
   LogicalResult
   matchAndRewrite(linalg::LinalgOp op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    if (!linalg::isaContractionOpInterface(op)) {
-      return rewriter.notifyMatchFailure(
-          op, "does not implement ContractionOpInterface");
-    }
-
-    auto converter = static_cast<const MaterializeEncodingTypeConverter *>(
-        this->getTypeConverter());
-
+    auto converter = getTypeConverter<MaterializeEncodingTypeConverter>();
     IREE::Encoding::LayoutMaterializerAttr layoutAttr =
         converter->getLayoutAttr();
     SmallVector<Type> convertedResTypes;
@@ -669,6 +662,10 @@ public:
     }
     Operation *newOp =
         layoutAttr.lowerOp(rewriter, op, convertedResTypes, operands);
+    if (!newOp) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported operation for encoding materialization");
+    }
     rewriter.replaceOp(op, newOp->getResults());
     return success();
   }
@@ -776,7 +773,8 @@ void populateMaterializeEncodingPatterns(
                          isRankedTensorTypeWithEncoding);
   });
 
-  patterns.insert<MaterializeConvolutionOp, SetEncodingOpLoweringConversion,
+  patterns.insert<MaterializeConvolutionOp, MaterializeLinalgOp,
+                  SetEncodingOpLoweringConversion,
                   UnsetEncodingOpLoweringConversion,
                   MaterializeOperation<tensor::EmptyOp>,
                   MaterializeOptimizationBarrierOp,

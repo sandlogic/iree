@@ -105,6 +105,83 @@ struct ConvertHwcfToFhwc : OpRewritePattern<linalg::Conv2DNhwcHwcfOp> {
   }
 };
 
+/// Transpose NHWC HWCF generic conv filter to FHWC.
+/// Handles multi-operand generics (e.g. YOLO QLinearConv with extra ZP scalars)
+/// without relying on inferConvolutionDims. Detects layout directly from maps:
+///   input last result = reduction dim  → NHWC
+///   filter first result = reduction dim → HWCF [kH,kW,C,F]
+/// Rebuilds the generic keeping ALL operands; only the filter map and value change.
+struct ConvertNhwcHwcfGenericToFhwc : OpRewritePattern<linalg::GenericOp> {
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(linalg::GenericOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!linalg::isaConvolutionOpInterface(op)) return failure();
+
+    auto maps = op.getIndexingMapsArray();
+    if (maps.size() < 2) return failure();
+
+    auto iterTypes = op.getIteratorTypesArray();
+
+    // Input: last result must be a pure dim that maps to a reduction (C_in).
+    auto inputMap = maps[0];
+    if (inputMap.getNumResults() == 0) return failure();
+    auto inputLastExpr =
+        dyn_cast<AffineDimExpr>(inputMap.getResult(inputMap.getNumResults() - 1));
+    if (!inputLastExpr) return failure();
+    unsigned inputLastPos = inputLastExpr.getPosition();
+    if (inputLastPos >= iterTypes.size() ||
+        !linalg::isReductionIterator(iterTypes[inputLastPos]))
+      return failure();
+
+    // Filter: first result must be a pure dim that maps to a reduction (kH in HWCF).
+    auto filterMap = maps[1];
+    if (filterMap.getNumResults() == 0) return failure();
+    auto filterFirstExpr = dyn_cast<AffineDimExpr>(filterMap.getResult(0));
+    if (!filterFirstExpr) return failure();
+    unsigned filterFirstPos = filterFirstExpr.getPosition();
+    if (filterFirstPos >= iterTypes.size() ||
+        !linalg::isReductionIterator(iterTypes[filterFirstPos]))
+      return failure();
+
+    // Filter must be 4D (HWCF has exactly kH,kW,C,F dims).
+    if (filterMap.getNumResults() != 4) return failure();
+
+    // Verify filter is not already FHWC (last result = reduction, first = parallel).
+    auto filterLastExpr = dyn_cast<AffineDimExpr>(filterMap.getResult(3));
+    if (!filterLastExpr) return failure();
+    unsigned filterLastPos = filterLastExpr.getPosition();
+    if (filterLastPos >= iterTypes.size() ||
+        !linalg::isParallelIterator(iterTypes[filterLastPos]))
+      return failure();
+
+    // Perm [3,0,1,2]: HWCF → FHWC.
+    SmallVector<int64_t> perm = {3, 0, 1, 2};
+    AffineMap newFilterMap = applyPermutationToResults(filterMap, perm);
+    Value filterVal = op.getInputs()[1];
+    Value transposedFilter =
+        createTransposeOp(rewriter, op.getLoc(), filterVal, perm);
+
+    // Rebuild maps: replace filter map, keep all others unchanged.
+    SmallVector<AffineMap> newMaps = maps;
+    newMaps[1] = newFilterMap;
+
+    // Rebuild generic keeping ALL operands (inputs and outputs) intact.
+    auto newOp = linalg::GenericOp::create(
+        rewriter, op.getLoc(), op.getResultTypes(),
+        [&]() {
+          SmallVector<Value> newInputs = op.getInputs();
+          newInputs[1] = transposedFilter;
+          return newInputs;
+        }(),
+        op.getOutputs(), newMaps, op.getIteratorTypesArray());
+    rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
+                                newOp.getRegion().begin());
+    rewriter.replaceOp(op, newOp->getResults());
+    return success();
+  }
+};
+
 /// Transpose the generic form filter layout of `CHWF` or `CFHW` to `FHWC`.
 struct ConvertGenericFilterToFhwc : OpRewritePattern<linalg::GenericOp> {
   using Base::Base;
@@ -188,7 +265,9 @@ struct ConvertGenericFilterToFhwc : OpRewritePattern<linalg::GenericOp> {
     bool isChwf =
         (cPos < kFilterPos.front()) && (fPos == filterShape.size() - 1);
     bool isCfhw = (cPos < fFilterPos.front()) && (fPos < kFilterPos.front());
-    if (!isChwf && !isCfhw) {
+    // HWCF [kH,kW,C,F]: kernel dims first, then C, then F last
+    bool isHwcf = (kFilterPos.back() < cPos) && (cPos < fPos);
+    if (!isChwf && !isCfhw && !isHwcf) {
       return failure();
     }
 
@@ -297,7 +376,8 @@ public:
       patterns.add<ConvertHwcfToHwfc>(context);
     } else if (filterLayout == "fhwc") {
       LDBG() << "Converting filter layout to fhwc.";
-      patterns.add<ConvertHwcfToFhwc, ConvertGenericFilterToFhwc>(context);
+      patterns.add<ConvertHwcfToFhwc, ConvertGenericFilterToFhwc,
+                   ConvertNhwcHwcfGenericToFhwc>(context);
     } else {
       LDBG() << "convert-filter-to-channels-last pass didn't apply since an "
                 "unsupported layout is given. Please use hwfc or fhwc as pass "

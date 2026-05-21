@@ -484,8 +484,29 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
   auto inputMap = indexingMaps[0];
   int count = 0;
 
+  // Helper: recursively check if expr contains both a parallel and a reduction
+  // dim (used to identify tiled-conv floorDiv/mod access patterns).
+  auto containsParallelAndReductionDim =
+      [&](AffineExpr expr) -> bool {
+    bool hasParallel = false, hasReduction = false;
+    std::function<void(AffineExpr)> walk = [&](AffineExpr e) {
+      if (auto dim = dyn_cast<AffineDimExpr>(e)) {
+        unsigned pos = dim.getPosition();
+        if (pos < isReductionDim.size()) {
+          if (isReductionDim[pos]) hasReduction = true;
+          else hasParallel = true;
+        }
+      } else if (auto bin = dyn_cast<AffineBinaryOpExpr>(e)) {
+        walk(bin.getLHS());
+        walk(bin.getRHS());
+      }
+    };
+    walk(expr);
+    return hasParallel && hasReduction;
+  };
+
   for (auto expr : inputMap.getResults()) {
-    //  patter for :  (parallel  * const +reduction  ) or (parallel+ reduction)
+    //  pattern for :  (parallel  * const +reduction  ) or (parallel+ reduction)
     if (auto addexpr = dyn_cast<AffineBinaryOpExpr>(expr)) {
 
       if (addexpr.getKind() == AffineExprKind::Add) {
@@ -536,6 +557,14 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
             checkOperands(addexpr.getRHS(), addexpr.getLHS())) {
           count++;
         }
+      }
+
+      // Tiled-conv 10D pattern: floorDiv or mod of an expression that mixes
+      // parallel and reduction dims (e.g. (d0*stride + d6 + d3) / tH).
+      if (addexpr.getKind() == AffineExprKind::FloorDiv ||
+          addexpr.getKind() == AffineExprKind::Mod) {
+        if (containsParallelAndReductionDim(addexpr.getLHS()))
+          count++;
       }
     }
   }

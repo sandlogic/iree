@@ -459,20 +459,247 @@ FailureOr<Operation *> lowerConvolutionOpWithEncoding(
   Value newResult =
       getTileConvOperand(operands[2], linalgOp, builder, ri, elemTypes, 2);
   Type newResultType = newResult.getType();
-  result = linalg::GenericOp::create(
-      builder, linalgOp.getLoc(), newResultType, ValueRange{newLHS, newRHS},
-      ValueRange{newResult}, convertedMaps, convertedIterType,
-      [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
-        Value mul =
-            arith::MulIOp::create(nestedBuilder, nestedLoc, args[0], args[1])
-                ->getResult(0);
-        Value add =
-            arith::AddIOp::create(nestedBuilder, nestedLoc, mul, args[2])
-                ->getResult(0);
-        linalg::YieldOp::create(nestedBuilder, nestedLoc, add);
-      })
-      .getOperation();
+  result =
+      linalg::GenericOp::create(
+          builder, linalgOp.getLoc(), newResultType, ValueRange{newLHS, newRHS},
+          ValueRange{newResult}, convertedMaps, convertedIterType,
+          [&](OpBuilder &nestedBuilder, Location nestedLoc, ValueRange args) {
+            Value mul = arith::MulIOp::create(nestedBuilder, nestedLoc, args[0],
+                                              args[1])
+                            ->getResult(0);
+            Value add =
+                arith::AddIOp::create(nestedBuilder, nestedLoc, mul, args[2])
+                    ->getResult(0);
+            linalg::YieldOp::create(nestedBuilder, nestedLoc, add);
+          })
+          .getOperation();
   return result;
+}
+
+//===----------------------------------------------------------------------===//
+// EXSLERATEV2-specific conv lowering with full tiled layouts.
+//
+// Hardware tile constants (tiled_conv_kernel.cc):
+//   CHANNEL_SET_SIZE = FILTER_SET_SIZE = 32
+//   default spatial tile: tileH=4, tileW=8
+//
+// Packed layouts (all NHWC):
+//   input  [IH, IW, C]     -> [IH/tH, IW/tW, C/32,  tH, tW, 32]
+//   filter [KH, KW, C, F]  -> [F/32,  KH,    KW,    C/32, 32, 32]
+//   output [OH, OW, F]     -> [OH/tH, OW/tW, F/32,  tH, tW, 32]
+//
+// 10-D loop nest (matches run_tiled_convolution_impl loops):
+//   d0=ty_cube d1=tx_cube d2=fs d3=ky d4=kx d5=cs d6=ly d7=lx d8=filt d9=c
+//===----------------------------------------------------------------------===//
+
+static constexpr int64_t kExslTileH = 4;
+static constexpr int64_t kExslTileW = 8;
+static constexpr int64_t kExslChSet = 32;   // CHANNEL_SET_SIZE
+static constexpr int64_t kExslFiltSet = 32; // FILTER_SET_SIZE
+
+// Return the coefficient of affine dim `dimIdx` in `expr`.
+// Handles d*c, c*d, and additive compositions thereof.
+static int64_t exslExtractStride(AffineExpr expr, unsigned dimIdx) {
+  if (auto dim = dyn_cast<AffineDimExpr>(expr)) {
+    return dim.getPosition() == dimIdx ? 1 : 0;
+  }
+  if (auto bin = dyn_cast<AffineBinaryOpExpr>(expr)) {
+    if (bin.getKind() == AffineExprKind::Mul) {
+      if (auto ld = dyn_cast<AffineDimExpr>(bin.getLHS())) {
+        if (auto rc = dyn_cast<AffineConstantExpr>(bin.getRHS())) {
+          return ld.getPosition() == dimIdx ? rc.getValue() : 0;
+        }
+      }
+      if (auto rd = dyn_cast<AffineDimExpr>(bin.getRHS())) {
+        if (auto lc = dyn_cast<AffineConstantExpr>(bin.getLHS())) {
+          return rd.getPosition() == dimIdx ? lc.getValue() : 0;
+        }
+      }
+    }
+    if (bin.getKind() == AffineExprKind::Add) {
+      return exslExtractStride(bin.getLHS(), dimIdx) +
+             exslExtractStride(bin.getRHS(), dimIdx);
+    }
+  }
+  return 0;
+}
+
+// Creates the 10-D tiled linalg.generic for EXSLERATEV2 convolution.
+// Supports both NHWC (input [H,W,C]) and NCHW (input [C,H,W]) formats.
+// Operands in `operands` are expected to already be in packed form (emitted
+// by the materialization framework before calling lowerOp).
+static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
+    OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
+    IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
+  if (!linalgOp.hasPureTensorSemantics()) {
+    return failure();
+  }
+
+  auto inputs = linalgOp.getDpsInputOperands();
+  auto outputs = linalgOp.getDpsInits();
+  if (inputs.size() < 2 || outputs.size() != 1) {
+    return failure();
+  }
+
+  // Require filter (RHS) to carry CONV_RHS encoding to identify conv ops.
+  auto rhsType = cast<RankedTensorType>(inputs[1]->get().getType());
+  auto filterEnc = IREE::Encoding::getEncodingAttr(rhsType);
+  if (!filterEnc ||
+      filterEnc.getOperandIndex().getValue() != IREE::Encoding::CONV_RHS) {
+    return failure();
+  }
+
+  // Standard 2-D conv has 6 loop dims: OH, OW, F, KH, KW, C.
+  int64_t origRank =
+      static_cast<int64_t>(linalgOp.getStaticLoopRanges().size());
+  if (origRank != 6) {
+    return failure();
+  }
+
+  SmallVector<AffineMap> origMaps = linalgOp.getIndexingMapsArray();
+
+  // Detect input format from the LHS indexing map:
+  //   NHWC [H, W, C]: last result is a pure dim expr (channel)
+  //   NCHW [C, H, W]: first result is a pure dim expr (channel)
+  AffineMap lhsMap = origMaps[0];
+  bool isNHWC = dyn_cast<AffineDimExpr>(
+                    lhsMap.getResult(lhsMap.getNumResults() - 1)) != nullptr;
+  bool isNCHW =
+      !isNHWC && dyn_cast<AffineDimExpr>(lhsMap.getResult(0)) != nullptr;
+  if (!isNHWC && !isNCHW) {
+    return failure();
+  }
+
+  // Stride lives at result[0]/result[1] for NHWC, result[1]/result[2] for NCHW.
+  int64_t strideH = isNHWC ? exslExtractStride(lhsMap.getResult(0), 0)
+                           : exslExtractStride(lhsMap.getResult(1), 0);
+  int64_t strideW = isNHWC ? exslExtractStride(lhsMap.getResult(1), 1)
+                           : exslExtractStride(lhsMap.getResult(2), 1);
+  if (strideH == 0) {
+    strideH = 1;
+  }
+  if (strideW == 0) {
+    strideW = 1;
+  }
+
+  // Build 10-D affine maps.
+  // Loop dims: d0=ty_cube, d1=tx_cube, d2=fs, d3=ky, d4=kx, d5=cs, d6=ly,
+  // d7=lx, d8=filt, d9=c iy = d0*(tH*sH) + d6*sH + d3   (raw input H index) ix
+  // = d1*(tW*sW) + d7*sW + d4   (raw input W index)
+  auto d = [&](unsigned i) { return builder.getAffineDimExpr(i); };
+  AffineExpr iy = d(0) * (kExslTileH * strideH) + d(6) * strideH + d(3);
+  AffineExpr ix = d(1) * (kExslTileW * strideW) + d(7) * strideW + d(4);
+
+  // Input:  [IH/tH, IW/tW, IC/32, tH, tW, 32]
+  AffineMap inputMap =
+      AffineMap::get(10, 0,
+                     {iy.floorDiv(kExslTileH), ix.floorDiv(kExslTileW), d(5),
+                      iy % kExslTileH, ix % kExslTileW, d(9)},
+                     builder.getContext());
+
+  // Filter: [F/32, KH, KW, C/32, 32, 32]
+  AffineMap filterMap = AffineMap::get(
+      10, 0, {d(2), d(3), d(4), d(5), d(8), d(9)}, builder.getContext());
+
+  // Output: [OH/tH, OW/tW, F/32, tH, tW, 32]
+  AffineMap outputMap = AffineMap::get(
+      10, 0, {d(0), d(1), d(2), d(6), d(7), d(8)}, builder.getContext());
+
+  SmallVector<utils::IteratorType> iterTypes = {
+      utils::IteratorType::parallel,  // d0: ty_cube
+      utils::IteratorType::parallel,  // d1: tx_cube
+      utils::IteratorType::parallel,  // d2: fs
+      utils::IteratorType::reduction, // d3: ky
+      utils::IteratorType::reduction, // d4: kx
+      utils::IteratorType::reduction, // d5: cs
+      utils::IteratorType::parallel,  // d6: ly
+      utils::IteratorType::parallel,  // d7: lx
+      utils::IteratorType::parallel,  // d8: filt_idx
+      utils::IteratorType::reduction, // d9: c
+  };
+
+  // Packed operands pre-packed by MaterializeDeviceEncoding:
+  //   operands[0]:              input  [IH/tH, IW/tW, IC/32, tH, tW, 32]
+  //   operands[1]:              filter [F/32, KH, KW, IC/32, 32, 32]
+  //   operands[2..N-1]:         extra inputs (e.g. zero points) — 0D, passed through
+  //   operands[inputs.size()]:  output [OH/tH, OW/tW, F/32, tH, tW, 32]
+  Value packedIn = operands[0];
+  Value packedFilter = operands[1];
+  size_t numExtraInputs = inputs.size() - 2;
+  Value packedOut = operands[inputs.size()];
+  Location loc = linalgOp.getLoc();
+
+  // The inputMap uses (iy.floorDiv(tH), ix.floorDiv(tW)) where iy/ix can
+  // exceed the packed tile count by 1 for the rightmost tile when the kernel
+  // stencil extends past the tile boundary.  Pad the packed input by
+  // ceil((kH-1)/tH) and ceil((kW-1)/tW) extra tiles so the MLIR linalg
+  // verifier sees in-bounds accesses.  The hardware kernel handles partial
+  // last tiles at runtime, so these extra zero elements are never accessed.
+  {
+    auto packedFilterTy = cast<RankedTensorType>(packedFilter.getType());
+    // Packed filter layout: [F/32, KH, KW, IC/32, 32, 32]
+    int64_t kH = packedFilterTy.getShape()[1];
+    int64_t kW = packedFilterTy.getShape()[2];
+    int64_t extraH = (kH + kExslTileH - 2) / kExslTileH;
+    int64_t extraW = (kW + kExslTileW - 2) / kExslTileW;
+    if (extraH > 0 || extraW > 0) {
+      auto packedInTy = cast<RankedTensorType>(packedIn.getType());
+      SmallVector<int64_t> paddedShape(packedInTy.getShape());
+      paddedShape[0] += extraH;
+      paddedShape[1] += extraW;
+      auto paddedTy =
+          RankedTensorType::get(paddedShape, packedInTy.getElementType());
+      Value zeroPad = arith::ConstantOp::create(
+          builder, loc, builder.getZeroAttr(packedInTy.getElementType()));
+      SmallVector<OpFoldResult> low(6, builder.getIndexAttr(0));
+      SmallVector<OpFoldResult> high = {
+          builder.getIndexAttr(extraH), builder.getIndexAttr(extraW),
+          builder.getIndexAttr(0),      builder.getIndexAttr(0),
+          builder.getIndexAttr(0),      builder.getIndexAttr(0)};
+      packedIn = tensor::PadOp::create(builder, loc, paddedTy, packedIn, low,
+                                       high, zeroPad);
+    }
+  }
+
+  auto packedOutType = cast<RankedTensorType>(packedOut.getType());
+  Type i32Ty = builder.getI32Type();
+
+  // Build input list and affine maps: packed tensors first, then extra 0D inputs.
+  SmallVector<Value> genericInputs = {packedIn, packedFilter};
+  SmallVector<AffineMap> allMaps = {inputMap, filterMap};
+  AffineMap zeroMap = AffineMap::get(10, 0, {}, builder.getContext());
+  for (size_t i = 2; i < inputs.size(); i++) {
+    genericInputs.push_back(operands[i]);
+    allMaps.push_back(zeroMap);
+  }
+  allMaps.push_back(outputMap);
+
+  // Index of the output accumulator block arg inside the generic body.
+  size_t accumArgIdx = 2 + numExtraInputs;
+
+  // 10-D tiled generic matching the tiled_conv2d kernel loop structure.
+  // Extra zero-point inputs (if any) are carried through with 0D maps and
+  // ignored in the body — hardware lowering via emitCSRFromTiledConv handles
+  // quantization separately from the body computation.
+  Value result10D =
+      linalg::GenericOp::create(
+          builder, loc, packedOutType, genericInputs,
+          ValueRange{packedOut},
+          ArrayRef<AffineMap>(allMaps), iterTypes,
+          [&](OpBuilder &nb, Location nb_loc, ValueRange args) {
+            Value lhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, args[0])
+                            ->getResult(0);
+            Value rhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, args[1])
+                            ->getResult(0);
+            Value mul =
+                arith::MulIOp::create(nb, nb_loc, lhs, rhs)->getResult(0);
+            Value add =
+                arith::AddIOp::create(nb, nb_loc, mul, args[accumArgIdx])
+                    ->getResult(0);
+            linalg::YieldOp::create(nb, nb_loc, add);
+          })
+          .getResult(0);
+  return result10D.getDefiningOp();
 }
 
 //===----------------------------------------------------------------------===//
@@ -960,7 +1187,7 @@ struct CPUEncodingResolverVerifier
 // Enumerate tile sizes to choose from when no specific architecture is
 // targeted. For narrow-{M,N} cases, this only enumerates on narrow M. The
 // narrow-N cases are handled by transposition in chooseMatmulTile.
-static SmallVector<TileMxNxK>
+ static SmallVector<TileMxNxK>
 enumerateVMVXMatmulTiles(linalg::ContractionDimensions cDims,
                          IREE::Encoding::EncodingAttr encoding,
                          DictionaryAttr config) {
@@ -1125,32 +1352,112 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
     return cast<Exsleratev2EncodingResolverAttr>(attr).getConfiguration();
   }
 
+  // Return tiling info for conv input and filter operands.
+  // Output (CONV_RESULT) is left flat; lowerOp handles its pack/unpack
+  // manually so that downstream requant ops see plain types.
+  //   CONV_LHS  [IH, IW, C]    -> [IH/tH, IW/tW, C/32,  tH, tW, 32]
+  //   CONV_RHS  [KH, KW, C, F] -> [F/32,  KH,    KW,    C/32, 32, 32]
+  //   CONV_RESULT               -> identity (no pack)
   MaterializeEncodingInfo getEncodingInfoImpl(Attribute attr,
                                               RankedTensorType type) const {
-    auto layoutAttr = cast<Exsleratev2EncodingResolverAttr>(attr);
-
     auto encoding = llvm::dyn_cast_or_null<IREE::Encoding::EncodingAttr>(
         type.getEncoding());
-
     MaterializeEncodingInfo info;
     if (!encoding) {
       return info;
     }
 
-    SmallVector<TileNxHxWxC> enumeratedTileNxHxWxC =
-        enumerateExsleratev2ConvTiles(encoding, layoutAttr.getConfiguration());
-    if (enumeratedTileNxHxWxC.empty()) {
+    // Only apply EXSLERATEV2 tiling to convolution encodings.
+    if (failed(IREE::Encoding::getEncodingConvDims(encoding))) {
       return info;
     }
 
-    TileNxHxWxC chosenTileNxHxWxC = chooseConvTile(enumeratedTileNxHxWxC);
-    FailureOr<MaterializeEncodingInfo> maybeEncodingInfo =
-        getEncodingInfoForConv(encoding, chosenTileNxHxWxC);
-    if (failed(maybeEncodingInfo)) {
+    // Detect input format from the LHS user_indexing_map.
+    // Only handle 6D conv loops (OH,OW,F,KH,KW,C). Pool ops have 5D loops
+    // and would false-match the NCHW heuristic — guard by num dims.
+    SmallVector<AffineMap> rootMaps = encoding.getRootMaps();
+    if (rootMaps.empty()) {
       return info;
     }
-    info = std::move(maybeEncodingInfo.value());
+    AffineMap lhsMap = rootMaps[0];
+    if (lhsMap.getNumDims() != 6) {
+      return info;
+    }
+    bool isNHWC =
+        lhsMap.getNumResults() > 0 &&
+        dyn_cast<AffineDimExpr>(lhsMap.getResult(lhsMap.getNumResults() - 1));
+    bool isNCHW = !isNHWC && lhsMap.getNumResults() > 0 &&
+                  dyn_cast<AffineDimExpr>(lhsMap.getResult(0));
+    if (!isNHWC && !isNCHW) {
+      return info;
+    }
 
+    unsigned opIdx = encoding.getOperandIndex().getValue().getZExtValue();
+    if (opIdx == IREE::Encoding::CONV_LHS) {
+      if (isNHWC) {
+        // NHWC [H, W, C] → [H/tH, W/tW, C/32, tH, tW, 32]
+        info.innerDimsPos = {0, 1, 2};
+        info.innerTileSizes = {kExslTileH, kExslTileW, kExslChSet};
+      } else {
+        // NCHW [C, H, W] → [H/tH, W/tW, C/32, tH, tW, 32] (spatial-tile-major,
+        // matches runtime)
+        info.innerDimsPos = {1, 2, 0};
+        info.innerTileSizes = {kExslTileH, kExslTileW, kExslChSet};
+        info.outerDimsPerm = {1, 2, 0};
+      }
+    } else if (opIdx == IREE::Encoding::CONV_RHS) {
+      // Detect actual filter layout from rootMaps[1] (filter indexing map).
+      // For 6D conv (d0=OH, d1=OW, d2=F, d3=KH, d4=KW, d5=C):
+      //   HWCF [KH,KW,C,F]: first result = d3 (reduction, position >= 3)
+      //   FHWC [F,KH,KW,C]: first result = d2 (parallel, position < 3)
+      bool isFHWC = false;
+      if (rootMaps.size() > 1 && rootMaps[1].getNumResults() > 0) {
+        if (auto dimExpr =
+                dyn_cast<AffineDimExpr>(rootMaps[1].getResult(0)))
+          isFHWC = (dimExpr.getPosition() < 3); // F is parallel, pos 0–2
+      }
+      if (isNHWC && isFHWC) {
+        // FHWC [F, KH, KW, C] → [F/32, KH, KW, C/32, 32, 32]
+        // Tile dim 0 (F) and dim 3 (C); outer order already correct — no perm.
+        info.innerDimsPos = {0, 3};
+        info.innerTileSizes = {kExslFiltSet, kExslChSet};
+      } else if (isNHWC) {
+        // HWCF [KH, KW, C, F] → [F/32, KH, KW, C/32, 32, 32]
+        info.outerDimsPerm = {3, 0, 1, 2};
+        info.innerDimsPos = {3, 2};
+        info.innerTileSizes = {kExslFiltSet, kExslChSet};
+      } else {
+        // NCHW filter [F, C, KH, KW] → [F/32, KH, KW, C/32, 32, 32]
+        info.outerDimsPerm = {0, 2, 3, 1};
+        info.innerDimsPos = {0, 1};
+        info.innerTileSizes = {kExslFiltSet, kExslChSet};
+      }
+    } else if (opIdx == IREE::Encoding::CONV_RESULT) {
+      if (type.getRank() == 1) {
+        // 1D bias [F] → [F/32, 32].
+        // outerDimsPerm must be {0} not empty — empty causes applyPermutation
+        // to drop the outer F/32 dim in lowerGenericOpWithResolvedLayouts,
+        // producing a 1-result map for a 2D tensor (SIGSEGV).
+        info.innerDimsPos = {0};
+        info.innerTileSizes = {kExslFiltSet};
+        info.outerDimsPerm = {0};
+      } else if (type.getRank() == 3) {
+        // 3D conv output [F, OH, OW] (NCHW) or [OH, OW, F] (NHWC) → packed
+        // to [OH/tH, OW/tW, F/32, tH, tW, 32], matching the tiled_conv2d
+        // output format.
+        if (isNHWC) {
+          info.innerDimsPos = {0, 1, 2};
+          info.innerTileSizes = {kExslTileH, kExslTileW, kExslFiltSet};
+          // outerDimsPerm must be explicit identity — empty perm causes
+          // outInverseOuterDimsPerm[] OOB access in lowerGenericOpWithResolvedLayouts.
+          info.outerDimsPerm = {0, 1, 2};
+        } else {
+          info.innerDimsPos = {1, 2, 0};
+          info.innerTileSizes = {kExslTileH, kExslTileW, kExslFiltSet};
+          info.outerDimsPerm = {1, 2, 0};
+        }
+      }
+    }
     return info;
   }
 };
@@ -1169,10 +1476,33 @@ struct Exsleratev2EncodingResolverMaterializerAttr final
       return nullptr;
     }
 
-    FailureOr<Operation *> newOp = lowerConvolutionOpWithEncoding(
+    if (auto fillOp = dyn_cast<linalg::FillOp>(op)) {
+      return lowerFillOpWithResolvedLayouts(b, fillOp, convertedResTypes,
+                                            convertedOperands);
+    }
+
+    if (linalg::isaContractionOpInterface(linalgOp)) {
+      return lowerContractionOpWithEncoding(
+          b, linalgOp, convertedOperands,
+          cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
+    }
+
+    FailureOr<Operation *> newOp = lowerExsleratev2ConvolutionOpWithEncoding(
         b, linalgOp, convertedOperands,
         cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
-    return newOp.value_or(nullptr);
+    if (succeeded(newOp)) {
+      return newOp.value();
+    }
+
+    if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
+      if (Operation *r = lowerGenericOpWithResolvedLayouts(
+              b, genericOp, convertedResTypes, convertedOperands,
+              cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr))) {
+        return r;
+      }
+    }
+
+    return nullptr;
   }
 };
 

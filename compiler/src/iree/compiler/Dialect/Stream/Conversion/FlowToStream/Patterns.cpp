@@ -32,50 +32,44 @@ static SmallVector<Value> flattenValues(ArrayRef<ValueRange> values) {
 
 // Helper: Apply custom tiling to tensor type to match hardware requirements.
 // Only applies to i8 (si8) tensors for hardware alignment.
-static RankedTensorType applyTilingToType(RankedTensorType type) {
-  // Only tile i8 (signed int8) tensors - f32 and other types stay unchanged
-  auto elementType = type.getElementType();
-  if (!elementType.isInteger(8)) {
-    return type;
-  }
-
-  const int64_t TILE_H = 8;
-  const int64_t TILE_W = 4;
-  const int64_t CHANNEL_SET_SIZE = 32;
-
-  int64_t rank = type.getRank();
-  if (rank < 2 || rank > 4) {
-    return type;
-  }
-
-  SmallVector<int64_t> tiledShape(type.getShape().begin(),
-                                  type.getShape().end());
-  SmallVector<int64_t> tileSizes(rank, 1);
-
-  if (rank == 4) {
-    tileSizes[0] = 1;                // batch
-    tileSizes[1] = CHANNEL_SET_SIZE; // channels
-    tileSizes[2] = TILE_H;           // height
-    tileSizes[3] = TILE_W;           // width
-  } else if (rank == 3) {
-    tileSizes[0] = CHANNEL_SET_SIZE; // channels
-    tileSizes[1] = TILE_H;           // height
-    tileSizes[2] = TILE_W;           // width
-  } else if (rank == 2) {
-    // MatMul: [M, N] -> only last dim (N) tiled to 32
-    tileSizes[0] = 1;                // M stays unchanged
-    tileSizes[1] = CHANNEL_SET_SIZE; // N -> 32
-  }
-
-  for (int i = 0; i < rank; ++i) {
-    if (tiledShape[i] != ShapedType::kDynamic && tileSizes[i] > 1) {
-      tiledShape[i] =
-          ((tiledShape[i] + tileSizes[i] - 1) / tileSizes[i]) * tileSizes[i];
-    }
-  }
-
-  return RankedTensorType::get(tiledShape, type.getElementType());
-}
+// NOTE: Commented out — assumes NCHW [C,H,W] but breaks for channels-last
+// (NHWC) tensors. Re-enable with layout-aware logic when needed.
+// static RankedTensorType applyTilingToType(RankedTensorType type) {
+//   auto elementType = type.getElementType();
+//   if (!elementType.isInteger(8)) {
+//     return type;
+//   }
+//   const int64_t TILE_H = 8;
+//   const int64_t TILE_W = 4;
+//   const int64_t CHANNEL_SET_SIZE = 32;
+//   int64_t rank = type.getRank();
+//   if (rank < 2 || rank > 4) {
+//     return type;
+//   }
+//   SmallVector<int64_t> tiledShape(type.getShape().begin(),
+//                                   type.getShape().end());
+//   SmallVector<int64_t> tileSizes(rank, 1);
+//   if (rank == 4) {
+//     tileSizes[0] = 1;                // batch
+//     tileSizes[1] = CHANNEL_SET_SIZE; // channels
+//     tileSizes[2] = TILE_H;           // height
+//     tileSizes[3] = TILE_W;           // width
+//   } else if (rank == 3) {
+//     tileSizes[0] = CHANNEL_SET_SIZE; // channels
+//     tileSizes[1] = TILE_H;           // height
+//     tileSizes[2] = TILE_W;           // width
+//   } else if (rank == 2) {
+//     tileSizes[0] = 1;                // M stays unchanged
+//     tileSizes[1] = CHANNEL_SET_SIZE; // N -> 32
+//   }
+//   for (int i = 0; i < rank; ++i) {
+//     if (tiledShape[i] != ShapedType::kDynamic && tileSizes[i] > 1) {
+//       tiledShape[i] =
+//           ((tiledShape[i] + tileSizes[i] - 1) / tileSizes[i]) * tileSizes[i];
+//     }
+//   }
+//   return RankedTensorType::get(tiledShape, type.getElementType());
+// }
 
 // Inserts a sizeof calculation for the given tensor value type and dims.
 // This should only be used to produce sizes for values produced by an op; the
@@ -88,32 +82,27 @@ static Value buildResultSizeOf(Location loc, Value tensorValue,
   // materialization of a bunch of redundant IR.
 
   // Apply custom tiling to tensor type to match buffer allocation
+  // NOTE: applyTilingToType commented out — assumes NCHW but breaks for
+  // channels-last (NHWC). Resource sizes now use exact tensor dimensions.
   auto tensorType = tensorValue.getType();
-  if (auto rankedType = dyn_cast<RankedTensorType>(tensorType)) {
-    // For rank-1 tensors, check if they're reshaped to multi-dim tensors.
-    // Use the reshape target's multi-dim tiled type directly (not a flattened
-    // rank-1) so that calculateStorageElementCountInBytes can apply dynamic
-    // tile sizes from the registry.  A rank-1 sizeof bypasses the registry
-    // because the registry only checks rank >= 3 tensors.
-    if (rankedType.getRank() == 1) {
-      for (auto user : tensorValue.getUsers()) {
-        if (auto reshapeOp = dyn_cast<IREE::Flow::TensorReshapeOp>(user)) {
-          if (reshapeOp.getSource() == tensorValue) {
-            auto reshapeResultType = reshapeOp.getResult().getType();
-            if (auto reshapeRankedType =
-                    dyn_cast<RankedTensorType>(reshapeResultType)) {
-              // Use the multi-dim tiled type so the registry can be consulted.
-              tensorType = applyTilingToType(reshapeRankedType);
-            }
-            break;
-          }
-        }
-      }
-    } else {
-      // For multi-dim tensors, apply tiling directly
-      tensorType = applyTilingToType(rankedType);
-    }
-  }
+  // if (auto rankedType = dyn_cast<RankedTensorType>(tensorType)) {
+  //   if (rankedType.getRank() == 1) {
+  //     for (auto user : tensorValue.getUsers()) {
+  //       if (auto reshapeOp = dyn_cast<IREE::Flow::TensorReshapeOp>(user)) {
+  //         if (reshapeOp.getSource() == tensorValue) {
+  //           auto reshapeResultType = reshapeOp.getResult().getType();
+  //           if (auto reshapeRankedType =
+  //                   dyn_cast<RankedTensorType>(reshapeResultType)) {
+  //             tensorType = applyTilingToType(reshapeRankedType);
+  //           }
+  //           break;
+  //         }
+  //       }
+  //     }
+  //   } else {
+  //     tensorType = applyTilingToType(rankedType);
+  //   }
+  // }
 
   return IREE::Stream::TensorSizeOfOp::create(
       rewriter, loc, rewriter.getIndexType(), TypeAttr::get(tensorType),
@@ -961,9 +950,9 @@ struct ConvertDispatchOp : AffinityOpConversionPattern<IREE::Flow::DispatchOp> {
 
         // Apply tiling to operand type before storing in encoding
         auto operandType = oldOperand.getType();
-        if (auto rankedType = dyn_cast<RankedTensorType>(operandType)) {
-          operandType = applyTilingToType(rankedType);
-        }
+        // if (auto rankedType = dyn_cast<RankedTensorType>(operandType)) {
+        //   operandType = applyTilingToType(rankedType);
+        // }
         operandEncodings.push_back(operandType);
       } else {
         allOperandSizes.push_back({});
@@ -998,9 +987,9 @@ struct ConvertDispatchOp : AffinityOpConversionPattern<IREE::Flow::DispatchOp> {
 
         // Apply tiling to result type before storing
         auto tiledResultType = oldResultType;
-        if (auto rankedType = dyn_cast<RankedTensorType>(oldResultType)) {
-          tiledResultType = applyTilingToType(rankedType);
-        }
+        // if (auto rankedType = dyn_cast<RankedTensorType>(oldResultType)) {
+        //   tiledResultType = applyTilingToType(rankedType);
+        // }
 
         resultSizes.push_back(
             buildResultSizeOf(op.getLoc(), result.value(), resultDynamicDims,

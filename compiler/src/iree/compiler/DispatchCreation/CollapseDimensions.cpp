@@ -1121,12 +1121,13 @@ collapseDimensionsForDispatch(IRRewriter &rewriter,
                   if (failed(maybeCollapseResult)) {
                     return failure();
                   }
-                  if (Attribute tileSelectAttr =
-                          genericOp->getAttr("exsleratev2.tile_select")) {
-                    maybeCollapseResult->collapsedOp->setAttr(
-                        "exsleratev2.tile_select", tileSelectAttr);
-                  }
-                  return maybeCollapseResult->results;
+                  //       if (Attribute tileSelectAttr =
+                  //               genericOp->getAttr("exsleratev2.tile_select"))
+                  //               {
+                  //         maybeCollapseResult->collapsedOp->setAttr(
+                  //             "exsleratev2.tile_select", tileSelectAttr);
+                  //       }
+                        return maybeCollapseResult->results;
                 })
             .Case<IREE::LinalgExt::AttentionOp>(
                 [&, &info = info](auto attentionOp) -> ResultsType {

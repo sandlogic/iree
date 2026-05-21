@@ -30,9 +30,9 @@ namespace mlir::iree_compiler::Preprocessing {
 #include "iree/compiler/Preprocessing/Common/Passes.h.inc" // IWYU pragma: export
 
 using ConvBuilderFn = std::function<Value(
-    OpBuilder &b, Location loc, linalg::LinalgOp srcConv, Value input,
-    Value filter, Value output, AffineMap inputMap, AffineMap filterMap,
-    AffineMap outputMap, SmallVector<unsigned> newDimOrder,
+    OpBuilder &b, Location loc, linalg::LinalgOp srcConv, ValueRange inputs,
+    Value output, ArrayRef<AffineMap> inputMaps, AffineMap outputMap,
+    SmallVector<unsigned> newDimOrder,
     SmallVector<utils::IteratorType> newIteratorTypes)>;
 using linalg::detail::MatchConvolutionResult;
 
@@ -41,33 +41,32 @@ using linalg::detail::MatchConvolutionResult;
 // on the map iterators for the new linalg op.
 static Value
 defaultConvBuilderFn(OpBuilder &b, Location loc, linalg::LinalgOp srcConv,
-                     Value input, Value filter, Value output,
-                     AffineMap inputMap, AffineMap filterMap,
-                     AffineMap outputMap, SmallVector<unsigned> newDimOrder,
+                     ValueRange inputs, Value output,
+                     ArrayRef<AffineMap> inputMaps, AffineMap outputMap,
+                     SmallVector<unsigned> newDimOrder,
                      SmallVector<utils::IteratorType> newIteratorTypes) {
-  AffineMap newInputMap = inputMap;
-  AffineMap newFilterMap = filterMap;
+  SmallVector<AffineMap> newInputMaps(inputMaps.begin(), inputMaps.end());
   AffineMap newOutputMap = outputMap;
   if (!newDimOrder.empty()) {
     DenseMap<AffineExpr, AffineExpr> dimMap;
     for (auto [newDim, oldDim] : llvm::enumerate(newDimOrder)) {
       dimMap[b.getAffineDimExpr(oldDim)] = b.getAffineDimExpr(newDim);
     }
-    newInputMap = inputMap.replace(dimMap,
-                                   /*numResultDims=*/newDimOrder.size(),
-                                   /*numResultSymbols=*/0);
-    newFilterMap = filterMap.replace(dimMap,
-                                     /*numResultDims=*/newDimOrder.size(),
-                                     /*numResultSymbols=*/0);
+    for (auto &map : newInputMaps) {
+      map = map.replace(dimMap,
+                        /*numResultDims=*/newDimOrder.size(),
+                        /*numResultSymbols=*/0);
+    }
     newOutputMap = outputMap.replace(dimMap,
                                      /*numResultDims=*/newDimOrder.size(),
                                      /*numResultSymbols=*/0);
   }
   SmallVector<utils::IteratorType> iterators = srcConv.getIteratorTypesArray();
   iterators.append(newIteratorTypes);
+  SmallVector<AffineMap> indexingMaps = newInputMaps;
+  indexingMaps.push_back(newOutputMap);
   auto genericConv = linalg::GenericOp::create(
-      b, loc, output.getType(), ValueRange{input, filter}, output,
-      ArrayRef<AffineMap>{newInputMap, newFilterMap, newOutputMap}, iterators);
+      b, loc, output.getType(), inputs, output, indexingMaps, iterators);
   IRMapping mapper;
   srcConv->getRegion(0).cloneInto(&genericConv.getRegion(), mapper);
   return genericConv.getResult(0);
@@ -76,13 +75,13 @@ defaultConvBuilderFn(OpBuilder &b, Location loc, linalg::LinalgOp srcConv,
 template <typename sourceNamedConvTy, typename targetNamedConvTy>
 static Value
 namedConvBuilderFn(OpBuilder &b, Location loc, linalg::LinalgOp srcConv,
-                   Value input, Value filter, Value output, AffineMap inputMap,
-                   AffineMap filterMap, AffineMap outputMap,
+                   ValueRange inputs, Value output,
+                   ArrayRef<AffineMap> inputMaps, AffineMap outputMap,
                    SmallVector<unsigned> newDimOrder,
                    SmallVector<utils::IteratorType> newIteratorTypes) {
   sourceNamedConvTy namedConv = cast<sourceNamedConvTy>(srcConv);
   return targetNamedConvTy::create(
-             b, loc, output.getType(), ValueRange{input, filter}, output,
+             b, loc, output.getType(), inputs, output,
              namedConv.getStrides(), namedConv.getDilations())
       .getResult(0);
 }
@@ -355,13 +354,15 @@ transposeConvLikeLinalgOp(PatternRewriter &rewriter, linalg::LinalgOp convOp,
     return failure();
   }
 
-  Value input = convOp->getOperand(0);
-  Value filter = convOp->getOperand(1);
-  Value output = convOp->getOperand(2);
+  SmallVector<Value> inputs = convOp.getDpsInputs();
+  Value input = inputs[0];
+  Value filter = inputs[1];
+  Value output = convOp.getDpsInits()[0];
 
-  auto inputMap = convOp.getIndexingMapsArray()[0];
-  auto filterMap = convOp.getIndexingMapsArray()[1];
-  auto outputMap = convOp.getIndexingMapsArray()[2];
+  auto indexingMaps = convOp.getIndexingMapsArray();
+  auto inputMap = indexingMaps[0];
+  auto filterMap = indexingMaps[1];
+  auto outputMap = indexingMaps.back();
 
   SmallVector<int64_t> inputIndices =
       collectChannelInnerDimsIndices(inputMap, convDims.inputChannel);
@@ -422,13 +423,23 @@ transposeConvLikeLinalgOp(PatternRewriter &rewriter, linalg::LinalgOp convOp,
                             utils::IteratorType::parallel);
   }
 
+  // Update inputs and their maps.
+  SmallVector<Value> newInputs = inputs;
+  newInputs[0] = transposedInput;
+  newInputs[1] = transposedFilter;
+
+  SmallVector<AffineMap> newInputMaps(indexingMaps.begin(),
+                                      indexingMaps.begin() + inputs.size());
+  newInputMaps[0] = transposedInputMap;
+  newInputMaps[1] = transposedFilterMap;
+
   // Invoke the builder function. For named op -> named op conversions, this
   // will construct the target named op, else it constructs a convolution like
   // generic.
   Value transposedConvResult =
-      convBuilder(rewriter, loc, convOp, transposedInput, transposedFilter,
-                  transposedOutput, transposedInputMap, transposedFilterMap,
-                  transposedOutputMap, newDimOrder, newIteratorTypes);
+      convBuilder(rewriter, loc, convOp, newInputs, transposedOutput,
+                  newInputMaps, transposedOutputMap, newDimOrder,
+                  newIteratorTypes);
 
   Value returnToNCHW = transposedConvResult;
   if (outputPack) {
@@ -476,6 +487,69 @@ struct ConvertLinalgConvOp : OpInterfaceRewritePattern<linalg::LinalgOp> {
 
 private:
   int tilingFactor;
+};
+
+//=====================================================================
+// NCHW pool to NHWC conversion pattern
+//=====================================================================
+
+// Converts linalg.pooling_nchw_max to linalg.pooling_nhwc_max by inserting
+// linalg.pack (transpose) ops on the input and output, mirroring the approach
+// used by transposeConvLikeLinalgOp for convolutions. Stage 1 (same as conv
+// conversion) ensures the pack ops become separate CPU dispatches.
+struct ConvertLinalgPoolNchwToNhwc
+    : OpRewritePattern<linalg::PoolingNchwMaxOp> {
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(linalg::PoolingNchwMaxOp poolOp,
+                                PatternRewriter &rewriter) const override {
+    Location loc = poolOp.getLoc();
+    Value input = poolOp.getDpsInputs()[0];
+    Value kernel = poolOp.getDpsInputs()[1];
+    Value output = poolOp.getDpsInits()[0];
+
+    auto maps = poolOp.getIndexingMapsArray();
+    AffineMap inputMap = maps[0];
+    AffineMap outputMap = maps.back();
+
+    // Channel dim sits at result index 1 in NCHW layout (N,C,H,W).
+    SmallVector<int64_t> channelIdx = {1};
+
+    if (isInnerIdentityIndices(channelIdx, inputMap.getNumResults()) &&
+        isInnerIdentityIndices(channelIdx, outputMap.getNumResults()))
+      return failure();
+
+    llvm::DenseMap<int64_t, int64_t> emptyMap;
+
+    auto [transposedInput, inputPackOpt, newInputMap] =
+        createTransposeAsTensorPack(rewriter, loc, input, inputMap, channelIdx,
+                                    /*tilingFactor=*/-1, emptyMap);
+
+    auto [transposedOutput, outputPackOpt, newOutputMap] =
+        createTransposeAsTensorPack(rewriter, loc, output, outputMap,
+                                    channelIdx, /*tilingFactor=*/-1, emptyMap);
+    if (!outputPackOpt)
+      return failure();
+
+    auto nhwcPool = linalg::PoolingNhwcMaxOp::create(
+        rewriter, loc, transposedOutput.getType(),
+        ValueRange{transposedInput, kernel}, ValueRange{transposedOutput},
+        poolOp.getStrides(), poolOp.getDilations());
+
+    for (NamedAttribute attr : poolOp->getAttrs()) {
+      StringRef name = attr.getName().getValue();
+      if (name != "strides" && name != "dilations" &&
+          name != "linalg.memoized_indexing_maps")
+        nhwcPool->setAttr(attr.getName(), attr.getValue());
+    }
+
+    Value nchwResult = createTransposeAsTensorUnPack(
+        rewriter, loc, nhwcPool.getResult(0), *outputPackOpt,
+        /*tilingFactor=*/-1);
+
+    rewriter.replaceOp(poolOp, nchwResult);
+    return success();
+  }
 };
 
 //=====================================================================
@@ -665,6 +739,7 @@ public:
         patterns.insert<ConvertLinalgConvNchwFchw>(context, /*benefit=*/2);
       }
       patterns.insert<ConvertLinalgConvOp>(context, tilingFactor);
+      patterns.insert<ConvertLinalgPoolNchwToNhwc>(context);
       if (failed(applyPatternsGreedily(op, std::move(patterns)))) {
         return signalPassFailure();
       }
@@ -720,3 +795,4 @@ public:
 } // namespace
 
 } // namespace mlir::iree_compiler::Preprocessing
+

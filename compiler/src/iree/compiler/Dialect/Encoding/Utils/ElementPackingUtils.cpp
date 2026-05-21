@@ -114,52 +114,52 @@ Value calculateStorageElementCountInBytes(Location loc,
         loc, builder, shapedType, dynamicDims);
   }
 
-  const int64_t CHANNEL_SET_SIZE = 32;
-
-  // Look up per-op tile sizes registered by ExsleratevGlobalTileSelectorPass.
-  // For rank-3 [C,H,W] and rank-4 [N,C,H,W] i8 tensors the registry maps
-  // the spatial shape to the hardware output tile sizes.  Falls back to
-  // the hardware defaults (8, 4) if the shape is not registered.
-  auto [TILE_H, TILE_W] = [&]() -> std::pair<int64_t, int64_t> {
-    std::lock_guard<std::mutex> lock(gTileSizeMutex);
-    int64_t r = shapedType.getRank();
-    if (r == 3 && !shapedType.isDynamicDim(0) && !shapedType.isDynamicDim(1) &&
-        !shapedType.isDynamicDim(2)) {
-      auto it = gTileSizeRegistry.find(
-          std::make_tuple(shapedType.getDimSize(0), shapedType.getDimSize(1),
-                          shapedType.getDimSize(2)));
-      if (it != gTileSizeRegistry.end()) {
-        llvm::errs() << "[TileReg] HIT (" << std::get<0>(it->first) << ","
-                     << std::get<1>(it->first) << "," << std::get<2>(it->first)
-                     << ") -> (" << it->second.first << "," << it->second.second
-                     << ")\n";
-        return it->second;
-      }
-    } else if (r == 4 && !shapedType.isDynamicDim(1) &&
-               !shapedType.isDynamicDim(2) && !shapedType.isDynamicDim(3)) {
-      auto it = gTileSizeRegistry.find(
-          std::make_tuple(shapedType.getDimSize(1), shapedType.getDimSize(2),
-                          shapedType.getDimSize(3)));
-      if (it != gTileSizeRegistry.end()) {
-        llvm::errs() << "[TileReg] HIT (" << std::get<0>(it->first) << ","
-                     << std::get<1>(it->first) << "," << std::get<2>(it->first)
-                     << ") -> (" << it->second.first << "," << it->second.second
-                     << ")\n";
-        return it->second;
-      }
-    }
-    if (r >= 3) {
-      int64_t c =
-          (r == 3) ? shapedType.getDimSize(0) : shapedType.getDimSize(1);
-      int64_t h =
-          (r == 3) ? shapedType.getDimSize(1) : shapedType.getDimSize(2);
-      int64_t w =
-          (r == 3) ? shapedType.getDimSize(2) : shapedType.getDimSize(3);
-      llvm::errs() << "[TileReg] lookup (" << c << "," << h << "," << w
-                   << ") -> MISS, using fallback\n";
-    }
-    return {8LL, 4LL}; // hardware default
-  }();
+  // const int64_t CHANNEL_SET_SIZE = 32;
+  //
+  // // Look up per-op tile sizes registered by ExsleratevGlobalTileSelectorPass.
+  // // For rank-3 [C,H,W] and rank-4 [N,C,H,W] i8 tensors the registry maps
+  // // the spatial shape to the hardware output tile sizes.  Falls back to
+  // // the hardware defaults (8, 4) if the shape is not registered.
+  // auto [TILE_H, TILE_W] = [&]() -> std::pair<int64_t, int64_t> {
+  //   std::lock_guard<std::mutex> lock(gTileSizeMutex);
+  //   int64_t r = shapedType.getRank();
+  //   if (r == 3 && !shapedType.isDynamicDim(0) && !shapedType.isDynamicDim(1) &&
+  //       !shapedType.isDynamicDim(2)) {
+  //     auto it = gTileSizeRegistry.find(
+  //         std::make_tuple(shapedType.getDimSize(0), shapedType.getDimSize(1),
+  //                         shapedType.getDimSize(2)));
+  //     if (it != gTileSizeRegistry.end()) {
+  //       llvm::errs() << "[TileReg] HIT (" << std::get<0>(it->first) << ","
+  //                    << std::get<1>(it->first) << "," << std::get<2>(it->first)
+  //                    << ") -> (" << it->second.first << "," << it->second.second
+  //                    << ")\n";
+  //       return it->second;
+  //     }
+  //   } else if (r == 4 && !shapedType.isDynamicDim(1) &&
+  //              !shapedType.isDynamicDim(2) && !shapedType.isDynamicDim(3)) {
+  //     auto it = gTileSizeRegistry.find(
+  //         std::make_tuple(shapedType.getDimSize(1), shapedType.getDimSize(2),
+  //                         shapedType.getDimSize(3)));
+  //     if (it != gTileSizeRegistry.end()) {
+  //       llvm::errs() << "[TileReg] HIT (" << std::get<0>(it->first) << ","
+  //                    << std::get<1>(it->first) << "," << std::get<2>(it->first)
+  //                    << ") -> (" << it->second.first << "," << it->second.second
+  //                    << ")\n";
+  //       return it->second;
+  //     }
+  //   }
+  //   if (r >= 3) {
+  //     int64_t c =
+  //         (r == 3) ? shapedType.getDimSize(0) : shapedType.getDimSize(1);
+  //     int64_t h =
+  //         (r == 3) ? shapedType.getDimSize(1) : shapedType.getDimSize(2);
+  //     int64_t w =
+  //         (r == 3) ? shapedType.getDimSize(2) : shapedType.getDimSize(3);
+  //     llvm::errs() << "[TileReg] lookup (" << c << "," << h << "," << w
+  //                  << ") -> MISS, using fallback\n";
+  //   }
+  //   return {8LL, 4LL}; // hardware default
+  // }();
 
   Type alignedElementType = legalizeStorageElementType(shapedType);
   unsigned elementBits = IREE::Util::getTypeBitWidth(alignedElementType);
@@ -167,7 +167,7 @@ Value calculateStorageElementCountInBytes(Location loc,
       elementBits, /*isPackedStorage=*/false);
 
   // Only apply tiling for i8 (signed int8) tensors
-  bool shouldApplyTiling = shapedType.getElementType().isInteger(8);
+  // bool shouldApplyTiling = shapedType.getElementType().isInteger(8);
 
   // Calculate all static dims first, if any.
   int64_t staticCount = 1;
@@ -177,54 +177,55 @@ Value calculateStorageElementCountInBytes(Location loc,
 
   int64_t rank = shapedType.getRank();
 
-  if (shouldApplyTiling && rank == 2 && dynamicDims.empty() &&
-      !shapedType.isDynamicDim(0) && !shapedType.isDynamicDim(1)) {
-    std::lock_guard<std::mutex> lock(gTileSizeMutex);
-    auto it = gFlattenedShapeByteRegistry.find(
-        std::make_pair(shapedType.getDimSize(0), shapedType.getDimSize(1)));
-    if (it != gFlattenedShapeByteRegistry.end()) {
-      llvm::errs() << "[FlatReg] HIT (" << shapedType.getDimSize(0) << ","
-                   << shapedType.getDimSize(1) << ") -> bytes=" << it->second
-                   << "\n";
-      return arith::ConstantIndexOp::create(builder, loc, it->second)
-          .getResult();
-    }
-  }
+  // if (shouldApplyTiling && rank == 2 && dynamicDims.empty() &&
+  //     !shapedType.isDynamicDim(0) && !shapedType.isDynamicDim(1)) {
+  //   std::lock_guard<std::mutex> lock(gTileSizeMutex);
+  //   auto it = gFlattenedShapeByteRegistry.find(
+  //       std::make_pair(shapedType.getDimSize(0), shapedType.getDimSize(1)));
+  //   if (it != gFlattenedShapeByteRegistry.end()) {
+  //     llvm::errs() << "[FlatReg] HIT (" << shapedType.getDimSize(0) << ","
+  //                  << shapedType.getDimSize(1) << ") -> bytes=" << it->second
+  //                  << "\n";
+  //     return arith::ConstantIndexOp::create(builder, loc, it->second)
+  //         .getResult();
+  //   }
+  // }
 
   for (unsigned i = 0; i < rank; ++i) {
     if (!shapedType.isDynamicDim(i)) {
       int64_t dimSize = shapedType.getDimSize(i);
 
       // Only apply tiling for i8 tensors
-      int64_t tileSize = 1;
-      if (shouldApplyTiling) {
-        if (rank == 4) {
-          if (i == 1) {
-            tileSize = CHANNEL_SET_SIZE;
-          } else if (i == 2) {
-            tileSize = TILE_H;
-          } else if (i == 3) {
-            tileSize = TILE_W;
-          }
-        } else if (rank == 3) {
-          if (i == 0) {
-            tileSize = CHANNEL_SET_SIZE;
-          } else if (i == 1) {
-            tileSize = TILE_H;
-          } else if (i == 2) {
-            tileSize = TILE_W;
-          }
-        } else if (rank == 2) {
-          // MatMul: [M, N] -> only last dim (N) tiled to 32
-          if (i == 1) {
-            tileSize = CHANNEL_SET_SIZE;
-          }
-          // dim[0] (M) stays unchanged
-        }
-      }
+      // int64_t tileSize = 1;
+      // if (shouldApplyTiling) {
+      //   if (rank == 4) {
+      //     if (i == 1) {
+      //       tileSize = CHANNEL_SET_SIZE;
+      //     } else if (i == 2) {
+      //       tileSize = TILE_H;
+      //     } else if (i == 3) {
+      //       tileSize = TILE_W;
+      //     }
+      //   } else if (rank == 3) {
+      //     if (i == 0) {
+      //       tileSize = CHANNEL_SET_SIZE;
+      //     } else if (i == 1) {
+      //       tileSize = TILE_H;
+      //     } else if (i == 2) {
+      //       tileSize = TILE_W;
+      //     }
+      //   } else if (rank == 2) {
+      //     // MatMul: [M, N] -> only last dim (N) tiled to 32
+      //     if (i == 1) {
+      //       tileSize = CHANNEL_SET_SIZE;
+      //     }
+      //     // dim[0] (M) stays unchanged
+      //   }
+      // }
 
-      int64_t tiledDim = ((dimSize + tileSize - 1) / tileSize) * tileSize;
-      staticCount *= tiledDim;
+      // int64_t tiledDim = ((dimSize + tileSize - 1) / tileSize) * tileSize;
+      // staticCount *= tiledDim;
+      staticCount *= dimSize;
     }
   }
 
@@ -232,54 +233,54 @@ Value calculateStorageElementCountInBytes(Location loc,
   auto value =
       arith::ConstantIndexOp::create(builder, loc, staticCount).getResult();
 
-  unsigned dynamicDimIdx = 0;
-  for (unsigned i = 0; i < rank; ++i) {
-    if (shapedType.isDynamicDim(i)) {
-      Value dim = dynamicDims[dynamicDimIdx++];
-
-      // Only apply tiling to dynamic dimensions for i8 tensors
-      int64_t tileSize = 1;
-      if (shouldApplyTiling) {
-        if (rank == 4) {
-          if (i == 1) {
-            tileSize = CHANNEL_SET_SIZE;
-          } else if (i == 2) {
-            tileSize = TILE_H;
-          } else if (i == 3) {
-            tileSize = TILE_W;
-          }
-        } else if (rank == 3) {
-          if (i == 0) {
-            tileSize = CHANNEL_SET_SIZE;
-          } else if (i == 1) {
-            tileSize = TILE_H;
-          } else if (i == 2) {
-            tileSize = TILE_W;
-          }
-        } else if (rank == 2) {
-          // MatMul: [M, N] -> only last dim (N) tiled to 32
-          if (i == 1) {
-            tileSize = CHANNEL_SET_SIZE;
-          }
-          // dim[0] (M) stays unchanged
-        }
-      }
-
-      if (tileSize > 1) {
-        Value tileSizeVal =
-            arith::ConstantIndexOp::create(builder, loc, tileSize);
-        Value tileSizeMinus1 =
-            arith::ConstantIndexOp::create(builder, loc, tileSize - 1);
-        Value sum =
-            builder.createOrFold<arith::AddIOp>(loc, dim, tileSizeMinus1);
-        Value divided =
-            builder.createOrFold<arith::DivUIOp>(loc, sum, tileSizeVal);
-        dim = builder.createOrFold<arith::MulIOp>(loc, divided, tileSizeVal);
-      }
-
-      value = builder.createOrFold<arith::MulIOp>(loc, value, dim);
-    }
-  }
+  // unsigned dynamicDimIdx = 0;
+  // for (unsigned i = 0; i < rank; ++i) {
+  //   if (shapedType.isDynamicDim(i)) {
+  //     Value dim = dynamicDims[dynamicDimIdx++];
+  //
+  //     // Only apply tiling to dynamic dimensions for i8 tensors
+  //     int64_t tileSize = 1;
+  //     if (shouldApplyTiling) {
+  //       if (rank == 4) {
+  //         if (i == 1) {
+  //           tileSize = CHANNEL_SET_SIZE;
+  //         } else if (i == 2) {
+  //           tileSize = TILE_H;
+  //         } else if (i == 3) {
+  //           tileSize = TILE_W;
+  //         }
+  //       } else if (rank == 3) {
+  //         if (i == 0) {
+  //           tileSize = CHANNEL_SET_SIZE;
+  //         } else if (i == 1) {
+  //           tileSize = TILE_H;
+  //         } else if (i == 2) {
+  //           tileSize = TILE_W;
+  //         }
+  //       } else if (rank == 2) {
+  //         // MatMul: [M, N] -> only last dim (N) tiled to 32
+  //         if (i == 1) {
+  //           tileSize = CHANNEL_SET_SIZE;
+  //         }
+  //         // dim[0] (M) stays unchanged
+  //       }
+  //     }
+  //
+  //     if (tileSize > 1) {
+  //       Value tileSizeVal =
+  //           arith::ConstantIndexOp::create(builder, loc, tileSize);
+  //       Value tileSizeMinus1 =
+  //           arith::ConstantIndexOp::create(builder, loc, tileSize - 1);
+  //       Value sum =
+  //           builder.createOrFold<arith::AddIOp>(loc, dim, tileSizeMinus1);
+  //       Value divided =
+  //           builder.createOrFold<arith::DivUIOp>(loc, sum, tileSizeVal);
+  //       dim = builder.createOrFold<arith::MulIOp>(loc, divided, tileSizeVal);
+  //     }
+  //
+  //     value = builder.createOrFold<arith::MulIOp>(loc, value, dim);
+  //   }
+  // }
 
   // Sub-byte packing requires putting multiple elements in the same byte.
   if (needsPacking) {
