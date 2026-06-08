@@ -147,7 +147,8 @@ getProducerDispatchValueAndOpChain(Value operand, bool enableAggressiveFusion) {
     // If it is an operation that we want to look past, add it to the chain
     // and update the `producerValue`.
     Operation *currOperation = producerValue.getOwner();
-    if (isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp>(currOperation)) {
+    if (isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::PadOp>(
+            currOperation)) {
       opChain.push_back(currOperation);
       producerValue = dyn_cast<OpResult>(currOperation->getOperand(0));
       continue;

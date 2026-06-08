@@ -214,6 +214,36 @@ void deserializeFromSLFb(const char* filename) {
       uint64_t output_byte_size =
           iree_exsleratev2_hal_exsleratev2_InputTileData_output_byte_size(
               input_tile_data);
+      uint8_t output_element_type =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_output_element_type(
+              input_tile_data);
+      uint32_t activation_binding_idx =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_activation_binding_idx(
+              input_tile_data);
+      bool has_filter_binding =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_has_filter_binding(
+              input_tile_data);
+      uint32_t filter_binding_idx =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_filter_binding_idx(
+              input_tile_data);
+      uint64_t filter_byte_offset =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_filter_byte_offset(
+              input_tile_data);
+      bool has_bias_binding =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_has_bias_binding(
+              input_tile_data);
+      uint32_t bias_binding_idx =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_bias_binding_idx(
+              input_tile_data);
+      uint64_t bias_byte_offset =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_bias_byte_offset(
+              input_tile_data);
+      uint64_t input_byte_size =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_input_byte_size(
+              input_tile_data);
+      uint8_t input_element_type =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_input_element_type(
+              input_tile_data);
 
       printf("  InputTileData:\n");
       printf("    input_tile_height: %u\n", tile_h);
@@ -243,17 +273,32 @@ void deserializeFromSLFb(const char* filename) {
       printf("    requant_output_scale: %f\n", requant_output_scale);
       printf("    dequant_scale: %f\n", dequant_scale);
       printf("    output_byte_size: %lu\n", output_byte_size);
-      uint32_t cpu_wg_x =
-          iree_exsleratev2_hal_exsleratev2_InputTileData_cpu_workgroup_count_x(
+      printf("    output_element_type: %u\n", output_element_type);
+      printf("    activation_binding_idx: %u\n", activation_binding_idx);
+      printf("    has_filter_binding: %s\n",
+             has_filter_binding ? "true" : "false");
+      printf("    filter_binding_idx: %u\n", filter_binding_idx);
+      printf("    filter_byte_offset: %lu\n", filter_byte_offset);
+      printf("    has_bias_binding: %s\n", has_bias_binding ? "true" : "false");
+      printf("    bias_binding_idx: %u\n", bias_binding_idx);
+      printf("    bias_byte_offset: %lu\n", bias_byte_offset);
+      printf("    input_byte_size: %lu\n", input_byte_size);
+      printf("    input_element_type: %u\n", input_element_type);
+      bool skip_input_tiling =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_skip_input_tiling(
               input_tile_data);
-      uint32_t cpu_wg_y =
-          iree_exsleratev2_hal_exsleratev2_InputTileData_cpu_workgroup_count_y(
+      bool skip_output_detiling =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_skip_output_detiling(
               input_tile_data);
-      uint32_t cpu_wg_z =
-          iree_exsleratev2_hal_exsleratev2_InputTileData_cpu_workgroup_count_z(
+      bool output_layout_chw =
+          iree_exsleratev2_hal_exsleratev2_InputTileData_output_layout_chw(
               input_tile_data);
-      printf("    cpu_workgroup_count: [%u, %u, %u]\n", cpu_wg_x, cpu_wg_y,
-             cpu_wg_z);
+      printf("    skip_input_tiling: %s\n",
+             skip_input_tiling ? "true" : "false");
+      printf("    skip_output_detiling: %s\n",
+             skip_output_detiling ? "true" : "false");
+      printf("    output_layout_chw: %s\n",
+             output_layout_chw ? "true" : "false");
     }
 
     iree_exsleratev2_hal_exsleratev2_DataBufferDef_vec_t data_buffers =
@@ -297,7 +342,8 @@ void deserializeFromSLFb(const char* filename) {
             flatbuffers_int32_vec_t data =
                 iree_exsleratev2_hal_exsleratev2_Int32Buffer_data(int32_buffer);
 
-            printf("      Int32Buffer (%zu): [", flatbuffers_int32_vec_len(data));
+            printf("      Int32Buffer (%zu): [",
+                   flatbuffers_int32_vec_len(data));
             for (size_t k = 0; k < flatbuffers_int32_vec_len(data); k++) {
               printf("%d ", flatbuffers_int32_vec_at(data, k));
             }
@@ -322,7 +368,8 @@ void deserializeFromSLFb(const char* filename) {
             flatbuffers_int32_vec_t data =
                 iree_exsleratev2_hal_exsleratev2_Int32Buffer_data(int32_buffer);
 
-            printf("      Int32Buffer (%zu): [", flatbuffers_int32_vec_len(data));
+            printf("      Int32Buffer (%zu): [",
+                   flatbuffers_int32_vec_len(data));
             for (size_t k = 0; k < flatbuffers_int32_vec_len(data); k++) {
               printf("%d ", flatbuffers_int32_vec_at(data, k));
             }

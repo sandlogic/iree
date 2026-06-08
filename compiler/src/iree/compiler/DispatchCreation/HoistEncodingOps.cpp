@@ -18,6 +18,7 @@
 #include "iree/compiler/Dialect/LinalgExt/Utils/Utils.h"
 #include "iree/compiler/Dialect/Util/Analysis/Constant/ConstExpr.h"
 #include "iree/compiler/Dialect/Util/IR/UtilOps.h"
+#include "iree/compiler/DispatchCreation/FusionUtils.h"
 #include "iree/compiler/DispatchCreation/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
@@ -169,6 +170,17 @@ static bool isHoistableOp(Operation *op) {
     return IREE::Flow::isOffsetSizeAndStrideMappableToFlow(offsets, sizes,
                                                            strides, srcShape);
   }
+  // A constant-padded tensor.pad (conv spatial halo) is hoistable: hoisting it
+  // out of the consumer dispatch together with its set_encoding lets
+  // FuseEncodingOpsIntoDispatchRegions relocate pad+set_encoding into the
+  // producer dispatch, so the cross-dispatch boundary tensor stays tiled.
+  // Only hoist when the padding value is a constant — otherwise relocating the
+  // pad would capture a non-dominating SSA value across dispatch boundaries.
+  if (auto padOp = dyn_cast<tensor::PadOp>(op)) {
+    Value padValue = padOp.getConstantPaddingValue();
+    return padValue && padValue.getDefiningOp() &&
+           padValue.getDefiningOp()->hasTrait<OpTrait::ConstantLike>();
+  }
   // ConstExprHoistingPolicy has an assumption that any root op is not hoistable
   // because they are already hoisted. This is not the case when the parent op
   // is a constant-like op, so we have a special rule here.
@@ -228,6 +240,26 @@ struct SinkUnsetEncodingOp : OpRewritePattern<IREE::Encoding::UnsetEncodingOp> {
         IREE::Flow::isNonNullAndOutsideDispatch(consumer)) {
       return rewriter.notifyMatchFailure(
           encodingOp, "expected that both operations are inside dispatch");
+    }
+
+    // Do not sink the encoding through a layout-permuting (transpose) consumer.
+    // Propagating an encoding through such an op composes the permutation into
+    // the encoding's user_indexing_maps as a [base, perm] map list, which the
+    // EXSLERATEV2 encoding resolver cannot materialize, and which also yields a
+    // multi-output generic with mismatched output maps that the
+    // generic-lowering helper rejects. Leaving the relayout transpose outside
+    // the encoding keeps it on the standard standalone-transpose path.
+    // Non-permuting consumers (e.g. dequant/elementwise with identity maps) are
+    // unaffected, so models without a surviving NHWC<->NCHW relayout (VGG16,
+    // YOLO) are unchanged.
+    if (auto consumerLinalg = dyn_cast<linalg::LinalgOp>(consumer)) {
+      for (AffineMap map : consumerLinalg.getIndexingMapsArray()) {
+        if (map.isPermutation() && !map.isIdentity()) {
+          return rewriter.notifyMatchFailure(
+              consumer, "consumer has a non-identity permutation (transpose) "
+                        "indexing map");
+        }
+      }
     }
 
     auto propagationAttrInterface =
@@ -343,6 +375,21 @@ void HoistEncodingOpsPass::runOnOperation() {
         }
       }
     }
+    // Guard: a hoisted tensor.pad must be fusable into a producer dispatch by
+    // FuseEncodingOpsIntoDispatchRegions; otherwise it is left stranded outside
+    // any dispatch and fails legalization in ConvertEncodingToFlow. Skip
+    // hoisting when the padded value has no producer dispatch (e.g. the input
+    // comes from a branch/concat rather than a single conv dispatch).
+    if (isHoistable) {
+      for (Operation *op : opsWithinDispatch) {
+        auto padOp = dyn_cast<tensor::PadOp>(op);
+        if (padOp && !getProducerDispatchValueAndOpChain(padOp.getSource())) {
+          isHoistable = false;
+          break;
+        }
+      }
+    }
+
     if (isHoistable) {
       candidates.push_back(llvm::to_vector(llvm::reverse(opsWithinDispatch)));
       return;
@@ -367,6 +414,25 @@ void HoistEncodingOpsPass::runOnOperation() {
   for (ArrayRef<Operation *> hoistableOps : candidates) {
     LDBG() << "Hoisting the ops for " << *hoistableOps.back();
     for (Operation *op : hoistableOps) {
+      // A tensor.pad's padding value is captured by its body region. If that
+      // constant lives inside the dispatch (sunk in by CloneProducers),
+      // hoisting the pad out would leave the use dangling. Re-materialize the
+      // constant inside the pad's own region so it travels with the pad.
+      if (auto padOp = dyn_cast<tensor::PadOp>(op)) {
+        Value padValue = padOp.getConstantPaddingValue();
+        if (Operation *cstOp = padValue ? padValue.getDefiningOp() : nullptr) {
+          Block &padBlock = padOp.getRegion().front();
+          auto yieldOp = cast<tensor::YieldOp>(padBlock.getTerminator());
+          if (yieldOp.getValue() == padValue &&
+              padValue.getParentBlock() != &padBlock) {
+            rewriter.setInsertionPoint(yieldOp);
+            Operation *clonedCst = rewriter.clone(*cstOp);
+            rewriter.modifyOpInPlace(yieldOp, [&]() {
+              yieldOp.getValueMutable().assign(clonedCst->getResult(0));
+            });
+          }
+        }
+      }
       if (failed(IREE::Flow::hoistOutOfDispatch(rewriter, op))) {
         op->emitOpError("failed to hoist the op out of dispatch");
         return signalPassFailure();

@@ -773,14 +773,13 @@ void populateMaterializeEncodingPatterns(
                          isRankedTensorTypeWithEncoding);
   });
 
-  patterns.insert<MaterializeConvolutionOp, MaterializeLinalgOp,
-                  SetEncodingOpLoweringConversion,
-                  UnsetEncodingOpLoweringConversion,
-                  MaterializeOperation<tensor::EmptyOp>,
-                  MaterializeOptimizationBarrierOp,
-                  MaterializeTensorExtDispatchTensorLoadOp,
-                  MaterializeTensorExtDispatchTensorStoreOp,
-                  MaterializeInterfaceBindingEncoding, MaterializeFuncReturnOp>(
+  patterns.insert<
+      MaterializeConvolutionOp, MaterializeLinalgOp,
+      SetEncodingOpLoweringConversion, UnsetEncodingOpLoweringConversion,
+      MaterializeOperation<tensor::EmptyOp>, MaterializeOptimizationBarrierOp,
+      MaterializeTensorExtDispatchTensorLoadOp,
+      MaterializeTensorExtDispatchTensorStoreOp,
+      MaterializeInterfaceBindingEncoding, MaterializeFuncReturnOp>(
       typeConverter, context);
 };
 

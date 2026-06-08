@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/AffineExprVisitor.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
@@ -453,6 +454,44 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
     return detail::MatchEXSLTiledConvolutionResult::NotLinalgOp;
   }
 
+  // Off-operand tiled-conv form (iree-org/iree#23746 style): the activation is
+  // read inside the body via tensor.extract rather than as a bound-mapped
+  // operand, so it has only the filter (+ optional 0D zero-points) as inputs.
+  // Identify it by an in-body tensor.extract together with muli/addi, a single
+  // init, a reduction dim, and a 6-result filter input map.
+  if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {
+    Block &body = genericOp.getRegion().front();
+    bool hasExtract = false, hasMulI = false, hasAddI = false;
+    for (auto &bodyOp : body.getOperations()) {
+      if (isa<tensor::ExtractOp>(bodyOp)) {
+        hasExtract = true;
+      } else if (isa<arith::MulIOp>(bodyOp)) {
+        hasMulI = true;
+      } else if (isa<arith::AddIOp>(bodyOp)) {
+        hasAddI = true;
+      }
+    }
+    if (hasExtract && hasMulI && hasAddI) {
+      if (genericOp.getNumDpsInits() != 1) {
+        return detail::MatchEXSLTiledConvolutionResult::WrongNumOperands;
+      }
+      bool hasReduction = llvm::any_of(
+          genericOp.getIteratorTypesArray(), [](utils::IteratorType t) {
+            return t == utils::IteratorType::reduction;
+          });
+      auto maps = genericOp.getIndexingMapsArray();
+      bool hasFilter6 = false;
+      for (unsigned i = 0, e = genericOp.getNumDpsInputs(); i < e; ++i) {
+        if (maps[i].getResults().size() == 6) {
+          hasFilter6 = true;
+        }
+      }
+      if (hasReduction && hasFilter6) {
+        return detail::MatchEXSLTiledConvolutionResult::Success;
+      }
+    }
+  }
+
   if (linalgOp.getNumDpsInputs() < 2 || linalgOp.getNumDpsInits() != 1) {
     return detail::MatchEXSLTiledConvolutionResult::WrongNumOperands;
   }
@@ -486,15 +525,17 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
 
   // Helper: recursively check if expr contains both a parallel and a reduction
   // dim (used to identify tiled-conv floorDiv/mod access patterns).
-  auto containsParallelAndReductionDim =
-      [&](AffineExpr expr) -> bool {
+  auto containsParallelAndReductionDim = [&](AffineExpr expr) -> bool {
     bool hasParallel = false, hasReduction = false;
     std::function<void(AffineExpr)> walk = [&](AffineExpr e) {
       if (auto dim = dyn_cast<AffineDimExpr>(e)) {
         unsigned pos = dim.getPosition();
         if (pos < isReductionDim.size()) {
-          if (isReductionDim[pos]) hasReduction = true;
-          else hasParallel = true;
+          if (isReductionDim[pos]) {
+            hasReduction = true;
+          } else {
+            hasParallel = true;
+          }
         }
       } else if (auto bin = dyn_cast<AffineBinaryOpExpr>(e)) {
         walk(bin.getLHS());
@@ -563,8 +604,9 @@ isEXSLTiledConvolutionInterfaceImpl(Operation *op) {
       // parallel and reduction dims (e.g. (d0*stride + d6 + d3) / tH).
       if (addexpr.getKind() == AffineExprKind::FloorDiv ||
           addexpr.getKind() == AffineExprKind::Mod) {
-        if (containsParallelAndReductionDim(addexpr.getLHS()))
+        if (containsParallelAndReductionDim(addexpr.getLHS())) {
           count++;
+        }
       }
     }
   }

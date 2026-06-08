@@ -88,10 +88,65 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
 
   IREE::Encoding::OpEncodingProperties encProps = *encodingResult;
 
+  // For a convolution whose activation (CONV_LHS = DPS input 0) is a constant
+  // symmetric spatial pad, encode the UNPADDED source instead of the pad
+  // result. This makes the consumer's tiled activation layout match the
+  // producer's tiled output (no cross-dispatch repack); the hardware applies
+  // the halo via CSR padding. We stash padH/W and later strip the kernel-offset
+  // addends from the conv's activation indexing map so it still verifies
+  // against the smaller (unpadded) operand extent. Only generic convs carry an
+  // explicit `indexing_maps` attr we can rewrite to make the unpadded operand
+  // verify; restrict the unpadded-encode to those.
+  bool isConv = linalg::isaConvolutionOpInterface(linalgOp) &&
+                isa<linalg::GenericOp>(linalgOp.getOperation());
+  int64_t convPadH = 0, convPadW = 0;
+  int64_t convInH = 0, convInW = 0;
+  int64_t convInC = 0;
+  bool droppedConvPad = false;
+
   // Set encodings on input operands.
   SmallVector<Value> encodedInputOperands;
   for (auto [idx, props] : llvm::enumerate(encProps.operands)) {
     Value src = linalgOp.getDpsInputs()[idx];
+    if (isConv && idx == 0) {
+      if (auto padOp = src.getDefiningOp<tensor::PadOp>()) {
+        Value padCst = padOp.getConstantPaddingValue();
+        ArrayRef<int64_t> lows = padOp.getStaticLow();
+        ArrayRef<int64_t> highs = padOp.getStaticHigh();
+        bool symmetric =
+            padCst && lows.size() == highs.size() && lows.size() >= 2;
+        for (size_t i = 0; symmetric && i < lows.size(); ++i) {
+          symmetric = !ShapedType::isDynamic(lows[i]) && lows[i] == highs[i];
+        }
+        // Apply the unpadded off-operand encode to EVERY conv with a symmetric
+        // constant activation pad (including the input-edge raw-image conv,
+        // e.g. C=3 RGB). This keeps all convs in one convention: unpadded
+        // activation buffer + halo applied by the NPU via CSR padding. The
+        // channel inner tile is always 32, so a sub-32 channel count (e.g. 3)
+        // is recorded separately as conv_in_c and programmed as the true
+        // logical channel count, while the buffer stays channel-padded to 32.
+        if (symmetric) {
+          convPadH = lows[0];
+          convPadW = lows[1];
+          src = padOp.getSource(); // encode the UNPADDED activation
+          // Record the exact unpadded spatial dims (HWC: dim0=H, dim1=W) and
+          // the true (unpadded) channel count so the NPU codegen programs the
+          // real input size/channels, not a back-computed one rounded to the
+          // tile.
+          if (auto st = dyn_cast<RankedTensorType>(src.getType())) {
+            if (st.getRank() >= 2 && !st.isDynamicDim(0) &&
+                !st.isDynamicDim(1)) {
+              convInH = st.getDimSize(0);
+              convInW = st.getDimSize(1);
+            }
+            if (st.getRank() >= 1 && !st.isDynamicDim(st.getRank() - 1)) {
+              convInC = st.getDimSize(st.getRank() - 1);
+            }
+          }
+          droppedConvPad = true;
+        }
+      }
+    }
     Value encoded =
         setEncoding(rewriter, loc, src, props.encoding, props.dynamicValues);
     encodedInputOperands.push_back(encoded);
@@ -110,6 +165,53 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
   Value opTiled =
       clone(rewriter, linalgOp, encodedInitOperand.getType(), encodedOperands)
           ->getResult(0);
+
+  // For the unpadded-activation conv: strip the kernel-offset reduction addends
+  // from the activation indexing map (e.g. (d0*sH + d3) -> (d0*sH)) so the
+  // map's inferred extent fits the smaller unpadded operand, and stamp the
+  // dropped pad so the NPU codegen can program the hardware halo via CSR.
+  if (droppedConvPad) {
+    auto tiledLinalg = cast<linalg::LinalgOp>(opTiled.getDefiningOp());
+    SmallVector<AffineMap> maps = tiledLinalg.getIndexingMapsArray();
+    SmallVector<utils::IteratorType> iters =
+        tiledLinalg.getIteratorTypesArray();
+    SmallVector<bool> isRed(iters.size(), false);
+    for (auto [i, it] : llvm::enumerate(iters)) {
+      isRed[i] = (it == utils::IteratorType::reduction);
+    }
+    auto bareRed = [&](AffineExpr x) {
+      auto dx = dyn_cast<AffineDimExpr>(x);
+      return dx && dx.getPosition() < isRed.size() && isRed[dx.getPosition()];
+    };
+    SmallVector<AffineExpr> newResults;
+    for (AffineExpr e : maps[0].getResults()) {
+      auto add = dyn_cast<AffineBinaryOpExpr>(e);
+      if (add && add.getKind() == AffineExprKind::Add) {
+        if (bareRed(add.getRHS())) {
+          newResults.push_back(add.getLHS());
+          continue;
+        }
+        if (bareRed(add.getLHS())) {
+          newResults.push_back(add.getRHS());
+          continue;
+        }
+      }
+      newResults.push_back(e);
+    }
+    maps[0] = AffineMap::get(maps[0].getNumDims(), maps[0].getNumSymbols(),
+                             newResults, rewriter.getContext());
+    tiledLinalg->setAttr("indexing_maps", rewriter.getAffineMapArrayAttr(maps));
+    tiledLinalg->setAttr("exsleratev2.conv_pad",
+                         rewriter.getDenseI64ArrayAttr({convPadH, convPadW}));
+    if (convInH > 0 && convInW > 0) {
+      tiledLinalg->setAttr("exsleratev2.conv_in_hw",
+                           rewriter.getDenseI64ArrayAttr({convInH, convInW}));
+    }
+    if (convInC > 0) {
+      tiledLinalg->setAttr("exsleratev2.conv_in_c",
+                           rewriter.getDenseI64ArrayAttr({convInC}));
+    }
+  }
 
   // Sizes are computed by original output size.
   SmallVector<OpFoldResult> outSizes =

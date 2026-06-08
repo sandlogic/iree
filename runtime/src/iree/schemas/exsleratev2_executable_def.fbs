@@ -89,12 +89,21 @@ table InputTileData {
     // Element type of the output tensor for CPU compiled dispatches.
     // 0 = int8, 1 = float32, 2 = int32. Derived from tensor type at compile time.
     output_element_type: uint8 = 0;
-    // Workgroup counts for compiled CPU dispatches (linalg.pack tiling).
-    // Set by ExsleratevCompileCpuPrograms from the packed output outer dims.
-    // 0 means not set; runtime defaults to 1.
-    cpu_workgroup_count_x: uint32 = 0;
-    cpu_workgroup_count_y: uint32 = 0;
-    cpu_workgroup_count_z: uint32 = 0;
+    activation_binding_idx: uint32 = 0;
+    has_filter_binding: bool = false;
+    filter_binding_idx: uint32 = 0;
+    filter_byte_offset: uint64 = 0;
+    has_bias_binding: bool = false;
+    bias_binding_idx: uint32 = 0;
+    bias_byte_offset: uint64 = 0;
+    // Input tensor byte size and element type for CPU compiled dispatches.
+    // 0 = int8, 1 = float32, 2 = int32. Derived from binding[0] type at
+    // compile time.
+    input_byte_size: uint64 = 0;
+    input_element_type: uint8 = 0;
+        skip_input_tiling: bool = false;
+        skip_output_detiling: bool = false;
+        output_layout_chw: bool = false;
 }
 
 // Layer definition

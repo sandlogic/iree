@@ -110,50 +110,72 @@ struct ConvertHwcfToFhwc : OpRewritePattern<linalg::Conv2DNhwcHwcfOp> {
 /// without relying on inferConvolutionDims. Detects layout directly from maps:
 ///   input last result = reduction dim  → NHWC
 ///   filter first result = reduction dim → HWCF [kH,kW,C,F]
-/// Rebuilds the generic keeping ALL operands; only the filter map and value change.
+/// Rebuilds the generic keeping ALL operands; only the filter map and value
+/// change.
 struct ConvertNhwcHwcfGenericToFhwc : OpRewritePattern<linalg::GenericOp> {
   using Base::Base;
 
   LogicalResult matchAndRewrite(linalg::GenericOp op,
                                 PatternRewriter &rewriter) const override {
-    if (!linalg::isaConvolutionOpInterface(op)) return failure();
+    if (!linalg::isaConvolutionOpInterface(op)) {
+      return failure();
+    }
 
     auto maps = op.getIndexingMapsArray();
-    if (maps.size() < 2) return failure();
+    if (maps.size() < 2) {
+      return failure();
+    }
 
     auto iterTypes = op.getIteratorTypesArray();
 
     // Input: last result must be a pure dim that maps to a reduction (C_in).
     auto inputMap = maps[0];
-    if (inputMap.getNumResults() == 0) return failure();
-    auto inputLastExpr =
-        dyn_cast<AffineDimExpr>(inputMap.getResult(inputMap.getNumResults() - 1));
-    if (!inputLastExpr) return failure();
+    if (inputMap.getNumResults() == 0) {
+      return failure();
+    }
+    auto inputLastExpr = dyn_cast<AffineDimExpr>(
+        inputMap.getResult(inputMap.getNumResults() - 1));
+    if (!inputLastExpr) {
+      return failure();
+    }
     unsigned inputLastPos = inputLastExpr.getPosition();
     if (inputLastPos >= iterTypes.size() ||
-        !linalg::isReductionIterator(iterTypes[inputLastPos]))
+        !linalg::isReductionIterator(iterTypes[inputLastPos])) {
       return failure();
+    }
 
-    // Filter: first result must be a pure dim that maps to a reduction (kH in HWCF).
+    // Filter: first result must be a pure dim that maps to a reduction (kH in
+    // HWCF).
     auto filterMap = maps[1];
-    if (filterMap.getNumResults() == 0) return failure();
+    if (filterMap.getNumResults() == 0) {
+      return failure();
+    }
     auto filterFirstExpr = dyn_cast<AffineDimExpr>(filterMap.getResult(0));
-    if (!filterFirstExpr) return failure();
+    if (!filterFirstExpr) {
+      return failure();
+    }
     unsigned filterFirstPos = filterFirstExpr.getPosition();
     if (filterFirstPos >= iterTypes.size() ||
-        !linalg::isReductionIterator(iterTypes[filterFirstPos]))
+        !linalg::isReductionIterator(iterTypes[filterFirstPos])) {
       return failure();
+    }
 
     // Filter must be 4D (HWCF has exactly kH,kW,C,F dims).
-    if (filterMap.getNumResults() != 4) return failure();
+    if (filterMap.getNumResults() != 4) {
+      return failure();
+    }
 
-    // Verify filter is not already FHWC (last result = reduction, first = parallel).
+    // Verify filter is not already FHWC (last result = reduction, first =
+    // parallel).
     auto filterLastExpr = dyn_cast<AffineDimExpr>(filterMap.getResult(3));
-    if (!filterLastExpr) return failure();
+    if (!filterLastExpr) {
+      return failure();
+    }
     unsigned filterLastPos = filterLastExpr.getPosition();
     if (filterLastPos >= iterTypes.size() ||
-        !linalg::isParallelIterator(iterTypes[filterLastPos]))
+        !linalg::isParallelIterator(iterTypes[filterLastPos])) {
       return failure();
+    }
 
     // Perm [3,0,1,2]: HWCF → FHWC.
     SmallVector<int64_t> perm = {3, 0, 1, 2};

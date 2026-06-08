@@ -116,22 +116,26 @@ Value calculateStorageElementCountInBytes(Location loc,
 
   // const int64_t CHANNEL_SET_SIZE = 32;
   //
-  // // Look up per-op tile sizes registered by ExsleratevGlobalTileSelectorPass.
+  // // Look up per-op tile sizes registered by
+  // ExsleratevGlobalTileSelectorPass.
   // // For rank-3 [C,H,W] and rank-4 [N,C,H,W] i8 tensors the registry maps
   // // the spatial shape to the hardware output tile sizes.  Falls back to
   // // the hardware defaults (8, 4) if the shape is not registered.
   // auto [TILE_H, TILE_W] = [&]() -> std::pair<int64_t, int64_t> {
   //   std::lock_guard<std::mutex> lock(gTileSizeMutex);
   //   int64_t r = shapedType.getRank();
-  //   if (r == 3 && !shapedType.isDynamicDim(0) && !shapedType.isDynamicDim(1) &&
+  //   if (r == 3 && !shapedType.isDynamicDim(0) && !shapedType.isDynamicDim(1)
+  //   &&
   //       !shapedType.isDynamicDim(2)) {
   //     auto it = gTileSizeRegistry.find(
   //         std::make_tuple(shapedType.getDimSize(0), shapedType.getDimSize(1),
   //                         shapedType.getDimSize(2)));
   //     if (it != gTileSizeRegistry.end()) {
   //       llvm::errs() << "[TileReg] HIT (" << std::get<0>(it->first) << ","
-  //                    << std::get<1>(it->first) << "," << std::get<2>(it->first)
-  //                    << ") -> (" << it->second.first << "," << it->second.second
+  //                    << std::get<1>(it->first) << "," <<
+  //                    std::get<2>(it->first)
+  //                    << ") -> (" << it->second.first << "," <<
+  //                    it->second.second
   //                    << ")\n";
   //       return it->second;
   //     }
@@ -142,8 +146,10 @@ Value calculateStorageElementCountInBytes(Location loc,
   //                         shapedType.getDimSize(3)));
   //     if (it != gTileSizeRegistry.end()) {
   //       llvm::errs() << "[TileReg] HIT (" << std::get<0>(it->first) << ","
-  //                    << std::get<1>(it->first) << "," << std::get<2>(it->first)
-  //                    << ") -> (" << it->second.first << "," << it->second.second
+  //                    << std::get<1>(it->first) << "," <<
+  //                    std::get<2>(it->first)
+  //                    << ") -> (" << it->second.first << "," <<
+  //                    it->second.second
   //                    << ")\n";
   //       return it->second;
   //     }

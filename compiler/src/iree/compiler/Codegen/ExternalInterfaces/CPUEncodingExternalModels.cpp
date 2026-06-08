@@ -582,20 +582,14 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
     strideW = 1;
   }
 
-  // Build 10-D affine maps.
+  // Build 10-D affine maps for the filter and output operands. The activation
+  // is read OFF the operand list via tensor.extract inside the body (so it is
+  // not a bound-checked linalg operand, cf. iree-org/iree#23746); the in-body
+  // raw input indices are
+  //   iy = d0*(tH*sH) + d6*sH + d3 ,  iw = d1*(tW*sW) + d7*sW + d4 .
   // Loop dims: d0=ty_cube, d1=tx_cube, d2=fs, d3=ky, d4=kx, d5=cs, d6=ly,
-  // d7=lx, d8=filt, d9=c iy = d0*(tH*sH) + d6*sH + d3   (raw input H index) ix
-  // = d1*(tW*sW) + d7*sW + d4   (raw input W index)
+  // d7=lx, d8=filt, d9=c.
   auto d = [&](unsigned i) { return builder.getAffineDimExpr(i); };
-  AffineExpr iy = d(0) * (kExslTileH * strideH) + d(6) * strideH + d(3);
-  AffineExpr ix = d(1) * (kExslTileW * strideW) + d(7) * strideW + d(4);
-
-  // Input:  [IH/tH, IW/tW, IC/32, tH, tW, 32]
-  AffineMap inputMap =
-      AffineMap::get(10, 0,
-                     {iy.floorDiv(kExslTileH), ix.floorDiv(kExslTileW), d(5),
-                      iy % kExslTileH, ix % kExslTileW, d(9)},
-                     builder.getContext());
 
   // Filter: [F/32, KH, KW, C/32, 32, 32]
   AffineMap filterMap = AffineMap::get(
@@ -621,8 +615,8 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
   // Packed operands pre-packed by MaterializeDeviceEncoding:
   //   operands[0]:              input  [IH/tH, IW/tW, IC/32, tH, tW, 32]
   //   operands[1]:              filter [F/32, KH, KW, IC/32, 32, 32]
-  //   operands[2..N-1]:         extra inputs (e.g. zero points) — 0D, passed through
-  //   operands[inputs.size()]:  output [OH/tH, OW/tW, F/32, tH, tW, 32]
+  //   operands[2..N-1]:         extra inputs (e.g. zero points) — 0D, passed
+  //   through operands[inputs.size()]:  output [OH/tH, OW/tW, F/32, tH, tW, 32]
   Value packedIn = operands[0];
   Value packedFilter = operands[1];
   size_t numExtraInputs = inputs.size() - 2;
@@ -664,9 +658,13 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
   auto packedOutType = cast<RankedTensorType>(packedOut.getType());
   Type i32Ty = builder.getI32Type();
 
-  // Build input list and affine maps: packed tensors first, then extra 0D inputs.
-  SmallVector<Value> genericInputs = {packedIn, packedFilter};
-  SmallVector<AffineMap> allMaps = {inputMap, filterMap};
+  // Build input list and affine maps: filter first, then extra 0D inputs.
+  // The activation (packedIn) is NOT a mapped operand; it is captured and read
+  // via tensor.extract in the body (off-operand / implicit-pad form). This lets
+  // the activation be unpadded without tripping the linalg.generic verifier's
+  // operand-extent inference. Only filter + output bound the 10 loop dims.
+  SmallVector<Value> genericInputs = {packedFilter};
+  SmallVector<AffineMap> allMaps = {filterMap};
   AffineMap zeroMap = AffineMap::get(10, 0, {}, builder.getContext());
   for (size_t i = 2; i < inputs.size(); i++) {
     genericInputs.push_back(operands[i]);
@@ -674,8 +672,9 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
   }
   allMaps.push_back(outputMap);
 
-  // Index of the output accumulator block arg inside the generic body.
-  size_t accumArgIdx = 2 + numExtraInputs;
+  // Body args: [filter, extra..., output_accumulator].
+  size_t accumArgIdx = 1 + numExtraInputs;
+  Value capturedIn = packedIn;
 
   // 10-D tiled generic matching the tiled_conv2d kernel loop structure.
   // Extra zero-point inputs (if any) are carried through with 0D maps and
@@ -683,23 +682,77 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
   // quantization separately from the body computation.
   Value result10D =
       linalg::GenericOp::create(
-          builder, loc, packedOutType, genericInputs,
-          ValueRange{packedOut},
+          builder, loc, packedOutType, genericInputs, ValueRange{packedOut},
           ArrayRef<AffineMap>(allMaps), iterTypes,
           [&](OpBuilder &nb, Location nb_loc, ValueRange args) {
-            Value lhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, args[0])
-                            ->getResult(0);
-            Value rhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, args[1])
-                            ->getResult(0);
-            Value mul =
-                arith::MulIOp::create(nb, nb_loc, lhs, rhs)->getResult(0);
+            auto loopIdx = [&](unsigned dim) -> Value {
+              return linalg::IndexOp::create(nb, nb_loc, dim);
+            };
+            auto cstIdx = [&](int64_t v) -> Value {
+              return arith::ConstantIndexOp::create(nb, nb_loc, v);
+            };
+            Value i0 = loopIdx(0), i1 = loopIdx(1), i3 = loopIdx(3),
+                  i4 = loopIdx(4), i5 = loopIdx(5), i6 = loopIdx(6),
+                  i7 = loopIdx(7), i9 = loopIdx(9);
+            // iy = i0*(tH*sH) + i6*sH + i3 ; iw = i1*(tW*sW) + i7*sW + i4
+            Value iy = arith::AddIOp::create(
+                nb, nb_loc,
+                arith::AddIOp::create(
+                    nb, nb_loc,
+                    arith::MulIOp::create(nb, nb_loc, i0,
+                                          cstIdx(kExslTileH * strideH)),
+                    arith::MulIOp::create(nb, nb_loc, i6, cstIdx(strideH))),
+                i3);
+            Value iw = arith::AddIOp::create(
+                nb, nb_loc,
+                arith::AddIOp::create(
+                    nb, nb_loc,
+                    arith::MulIOp::create(nb, nb_loc, i1,
+                                          cstIdx(kExslTileW * strideW)),
+                    arith::MulIOp::create(nb, nb_loc, i7, cstIdx(strideW))),
+                i4);
+            Value iyDiv =
+                arith::DivUIOp::create(nb, nb_loc, iy, cstIdx(kExslTileH));
+            Value iyRem =
+                arith::RemUIOp::create(nb, nb_loc, iy, cstIdx(kExslTileH));
+            Value iwDiv =
+                arith::DivUIOp::create(nb, nb_loc, iw, cstIdx(kExslTileW));
+            Value iwRem =
+                arith::RemUIOp::create(nb, nb_loc, iw, cstIdx(kExslTileW));
+            // packedIn layout: [IH/tH, IW/tW, IC/32, tH, tW, 32]
+            Value inVal = tensor::ExtractOp::create(
+                nb, nb_loc, capturedIn,
+                ValueRange{iyDiv, iwDiv, i5, iyRem, iwRem, i9});
+            Value lhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, inVal);
+            Value rhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, args[0]);
+            Value mul = arith::MulIOp::create(nb, nb_loc, lhs, rhs);
             Value add =
-                arith::AddIOp::create(nb, nb_loc, mul, args[accumArgIdx])
-                    ->getResult(0);
+                arith::AddIOp::create(nb, nb_loc, mul, args[accumArgIdx]);
             linalg::YieldOp::create(nb, nb_loc, add);
           })
           .getResult(0);
-  return result10D.getDefiningOp();
+  Operation *result10DOp = result10D.getDefiningOp();
+  // Stamp the conv strides so the NPU codegen can recover them: with the
+  // activation off the operand list there is no input indexing map for
+  // inferConvolutionDims to read.
+  result10DOp->setAttr("exsleratev2.conv_stride",
+                       builder.getDenseI64ArrayAttr({strideH, strideW}));
+  // Propagate the dropped spatial pad and the true unpadded input dims (set by
+  // SetEncoding when the activation was encoded unpadded) so emitCSR can
+  // program the hardware halo and the correct input size.
+  if (auto padAttr = linalgOp->getAttr("exsleratev2.conv_pad")) {
+    result10DOp->setAttr("exsleratev2.conv_pad", padAttr);
+  }
+  if (auto inHwAttr = linalgOp->getAttr("exsleratev2.conv_in_hw")) {
+    result10DOp->setAttr("exsleratev2.conv_in_hw", inHwAttr);
+  }
+  // True unpadded channel count (the packed layout rounds C up to the
+  // 32-element inner tile, so a sub-32 channel count like C=3 must be carried
+  // explicitly).
+  if (auto inCAttr = linalgOp->getAttr("exsleratev2.conv_in_c")) {
+    result10DOp->setAttr("exsleratev2.conv_in_c", inCAttr);
+  }
+  return result10DOp;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1187,7 +1240,7 @@ struct CPUEncodingResolverVerifier
 // Enumerate tile sizes to choose from when no specific architecture is
 // targeted. For narrow-{M,N} cases, this only enumerates on narrow M. The
 // narrow-N cases are handled by transposition in chooseMatmulTile.
- static SmallVector<TileMxNxK>
+static SmallVector<TileMxNxK>
 enumerateVMVXMatmulTiles(linalg::ContractionDimensions cDims,
                          IREE::Encoding::EncodingAttr encoding,
                          DictionaryAttr config) {
@@ -1412,9 +1465,9 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
       //   FHWC [F,KH,KW,C]: first result = d2 (parallel, position < 3)
       bool isFHWC = false;
       if (rootMaps.size() > 1 && rootMaps[1].getNumResults() > 0) {
-        if (auto dimExpr =
-                dyn_cast<AffineDimExpr>(rootMaps[1].getResult(0)))
+        if (auto dimExpr = dyn_cast<AffineDimExpr>(rootMaps[1].getResult(0))) {
           isFHWC = (dimExpr.getPosition() < 3); // F is parallel, pos 0–2
+        }
       }
       if (isNHWC && isFHWC) {
         // FHWC [F, KH, KW, C] → [F/32, KH, KW, C/32, 32, 32]
@@ -1449,7 +1502,8 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
           info.innerDimsPos = {0, 1, 2};
           info.innerTileSizes = {kExslTileH, kExslTileW, kExslFiltSet};
           // outerDimsPerm must be explicit identity — empty perm causes
-          // outInverseOuterDimsPerm[] OOB access in lowerGenericOpWithResolvedLayouts.
+          // outInverseOuterDimsPerm[] OOB access in
+          // lowerGenericOpWithResolvedLayouts.
           info.outerDimsPerm = {0, 1, 2};
         } else {
           info.innerDimsPos = {1, 2, 0};
@@ -1481,17 +1535,22 @@ struct Exsleratev2EncodingResolverMaterializerAttr final
                                             convertedOperands);
     }
 
-    if (linalg::isaContractionOpInterface(linalgOp)) {
-      return lowerContractionOpWithEncoding(
-          b, linalgOp, convertedOperands,
-          cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
-    }
-
+    // Try the convolution resolver first: it only matches ops whose filter
+    // carries a CONV_RHS encoding, so genuine matmuls fall through to the
+    // contraction path below. A conv whose activation indexing map was
+    // simplified for unpadded encoding (kernel offsets stripped) can otherwise
+    // be misclassified by isaContractionOpInterface and lowered to mmt4d.
     FailureOr<Operation *> newOp = lowerExsleratev2ConvolutionOpWithEncoding(
         b, linalgOp, convertedOperands,
         cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
     if (succeeded(newOp)) {
       return newOp.value();
+    }
+
+    if (linalg::isaContractionOpInterface(linalgOp)) {
+      return lowerContractionOpWithEncoding(
+          b, linalgOp, convertedOperands,
+          cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
     }
 
     if (auto genericOp = dyn_cast<linalg::GenericOp>(op)) {

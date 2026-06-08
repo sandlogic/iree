@@ -50,9 +50,10 @@ static bool isFusableWithSetEncoding(Operation *target) {
       continue;
     }
     if (!isa<tensor::CollapseShapeOp, tensor::ExpandShapeOp, tensor::EmptyOp,
-             tensor::ExtractSliceOp, IREE::Encoding::SetEncodingOp,
-             IREE::Encoding::UnsetEncodingOp, linalg::LinalgOp,
-             IREE::LinalgExt::AttentionOp, IREE::LinalgExt::GatherOp>(op)) {
+             tensor::ExtractSliceOp, tensor::PadOp,
+             IREE::Encoding::SetEncodingOp, IREE::Encoding::UnsetEncodingOp,
+             linalg::LinalgOp, IREE::LinalgExt::AttentionOp,
+             IREE::LinalgExt::GatherOp>(op)) {
       return false;
     }
   }

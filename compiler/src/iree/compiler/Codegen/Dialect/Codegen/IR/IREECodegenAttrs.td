@@ -51,7 +51,7 @@ def DispatchLoweringPassPipelineEnum : I32EnumAttr<
     // For out of tree pass-pipelines
     Custom,
 
-    // for exsleratev2-acclerator
+    // for exsleratev2-accelerator
     EXSLERATEV2_Conv2D,
 
     EXSLERATEV2_MatMul,

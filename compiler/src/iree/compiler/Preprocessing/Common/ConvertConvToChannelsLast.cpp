@@ -65,8 +65,8 @@ defaultConvBuilderFn(OpBuilder &b, Location loc, linalg::LinalgOp srcConv,
   iterators.append(newIteratorTypes);
   SmallVector<AffineMap> indexingMaps = newInputMaps;
   indexingMaps.push_back(newOutputMap);
-  auto genericConv = linalg::GenericOp::create(
-      b, loc, output.getType(), inputs, output, indexingMaps, iterators);
+  auto genericConv = linalg::GenericOp::create(b, loc, output.getType(), inputs,
+                                               output, indexingMaps, iterators);
   IRMapping mapper;
   srcConv->getRegion(0).cloneInto(&genericConv.getRegion(), mapper);
   return genericConv.getResult(0);
@@ -80,9 +80,9 @@ namedConvBuilderFn(OpBuilder &b, Location loc, linalg::LinalgOp srcConv,
                    SmallVector<unsigned> newDimOrder,
                    SmallVector<utils::IteratorType> newIteratorTypes) {
   sourceNamedConvTy namedConv = cast<sourceNamedConvTy>(srcConv);
-  return targetNamedConvTy::create(
-             b, loc, output.getType(), inputs, output,
-             namedConv.getStrides(), namedConv.getDilations())
+  return targetNamedConvTy::create(b, loc, output.getType(), inputs, output,
+                                   namedConv.getStrides(),
+                                   namedConv.getDilations())
       .getResult(0);
 }
 
@@ -436,10 +436,9 @@ transposeConvLikeLinalgOp(PatternRewriter &rewriter, linalg::LinalgOp convOp,
   // Invoke the builder function. For named op -> named op conversions, this
   // will construct the target named op, else it constructs a convolution like
   // generic.
-  Value transposedConvResult =
-      convBuilder(rewriter, loc, convOp, newInputs, transposedOutput,
-                  newInputMaps, transposedOutputMap, newDimOrder,
-                  newIteratorTypes);
+  Value transposedConvResult = convBuilder(
+      rewriter, loc, convOp, newInputs, transposedOutput, newInputMaps,
+      transposedOutputMap, newDimOrder, newIteratorTypes);
 
   Value returnToNCHW = transposedConvResult;
   if (outputPack) {
@@ -516,8 +515,9 @@ struct ConvertLinalgPoolNchwToNhwc
     SmallVector<int64_t> channelIdx = {1};
 
     if (isInnerIdentityIndices(channelIdx, inputMap.getNumResults()) &&
-        isInnerIdentityIndices(channelIdx, outputMap.getNumResults()))
+        isInnerIdentityIndices(channelIdx, outputMap.getNumResults())) {
       return failure();
+    }
 
     llvm::DenseMap<int64_t, int64_t> emptyMap;
 
@@ -528,8 +528,9 @@ struct ConvertLinalgPoolNchwToNhwc
     auto [transposedOutput, outputPackOpt, newOutputMap] =
         createTransposeAsTensorPack(rewriter, loc, output, outputMap,
                                     channelIdx, /*tilingFactor=*/-1, emptyMap);
-    if (!outputPackOpt)
+    if (!outputPackOpt) {
       return failure();
+    }
 
     auto nhwcPool = linalg::PoolingNhwcMaxOp::create(
         rewriter, loc, transposedOutput.getType(),
@@ -539,8 +540,9 @@ struct ConvertLinalgPoolNchwToNhwc
     for (NamedAttribute attr : poolOp->getAttrs()) {
       StringRef name = attr.getName().getValue();
       if (name != "strides" && name != "dilations" &&
-          name != "linalg.memoized_indexing_maps")
+          name != "linalg.memoized_indexing_maps") {
         nhwcPool->setAttr(attr.getName(), attr.getValue());
+      }
     }
 
     Value nchwResult = createTransposeAsTensorUnPack(
@@ -795,4 +797,3 @@ public:
 } // namespace
 
 } // namespace mlir::iree_compiler::Preprocessing
-
