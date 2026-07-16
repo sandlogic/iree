@@ -16,6 +16,7 @@ iree_cc_library(
   HDRS
     "CPUEncodingExternalModels.h"
     "CodegenExternalModels.h"
+    "Exsleratev2EncodingExternalModels.h"
     "GPUEncodingExternalModels.h"
     "Interfaces.h"
     "UtilExternalModels.h"
@@ -23,6 +24,7 @@ iree_cc_library(
   SRCS
     "CPUEncodingExternalModels.cpp"
     "CodegenExternalModels.cpp"
+    "Exsleratev2EncodingExternalModels.cpp"
     "GPUEncodingExternalModels.cpp"
     "Interfaces.cpp"
     "UtilExternalModels.cpp"

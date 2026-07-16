@@ -8,6 +8,7 @@
 
 #include "iree/compiler/Codegen/ExternalInterfaces/CPUEncodingExternalModels.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/CodegenExternalModels.h"
+#include "iree/compiler/Codegen/ExternalInterfaces/Exsleratev2EncodingExternalModels.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/GPUEncodingExternalModels.h"
 #include "iree/compiler/Codegen/ExternalInterfaces/UtilExternalModels.h"
 
@@ -17,6 +18,7 @@ void registerCodegenExternalInterfaces(DialectRegistry &registry) {
   IREE::Codegen::registerCodegenExternalModels(registry);
   IREE::Codegen::registerUtilExternalModels(registry);
   IREE::CPU::registerCPUEncodingExternalModels(registry);
+  IREE::CPU::registerExsleratev2EncodingExternalModels(registry);
   IREE::GPU::registerGPUEncodingExternalModels(registry);
 }
 

@@ -140,6 +140,58 @@ static bool isSupportedConvolutionOp(linalg::LinalgOp linalgOp) {
   return true;
 }
 
+/// Returns true iff the linalgOp body looks like a max-pooling reduction, i.e.
+/// yield(max(out, in)) with no weight multiply. This positively distinguishes a
+/// pooling op from a convolution (whose body is add(out, mul(...))).
+static bool hasPoolingLikeBody(linalg::LinalgOp linalgOp) {
+  auto outBlockArg =
+      linalgOp.getMatchingBlockArgument(linalgOp.getDpsInitOperand(0));
+  auto yieldOp =
+      dyn_cast<linalg::YieldOp>(outBlockArg.getParentBlock()->getTerminator());
+  if (!yieldOp) {
+    return false;
+  }
+  Operation *reduceOp = yieldOp->getOperand(0).getDefiningOp();
+  if (!reduceOp ||
+      !isa<arith::MaxSIOp, arith::MaxUIOp, arith::MaximumFOp, arith::MaxNumFOp>(
+          reduceOp)) {
+    return false;
+  }
+  // One operand of the reduction must be the running accumulator (init arg).
+  Value lhs = reduceOp->getOperand(0);
+  Value rhs = reduceOp->getOperand(1);
+  return lhs == outBlockArg || rhs == outBlockArg;
+}
+
+/// Not all pooling ops are supported by data tiling, so return true if:
+///   1) `linalgOp` meets the pre-conditions for data tiling defined in
+///      `dataTilablePreCondition`.
+///   2) `linalgOp` has convolution-interface indexing maps with spatial output
+///      image and filter (window) loops.
+///   3) `linalgOp` has NO input/output channel dims (the pooling signature, the
+///      inverse of the convolution check above).
+///   4) `linalgOp` has a max-reduction body.
+static bool isSupportedPoolingOp(linalg::LinalgOp linalgOp) {
+  if (!dataTilablePreCondition(linalgOp)) {
+    return false;
+  }
+  if (!linalg::isaConvolutionOpInterface(linalgOp)) {
+    return false;
+  }
+  auto convDims = linalg::inferConvolutionDims(linalgOp);
+  if (failed(convDims)) {
+    return false;
+  }
+  if (convDims->outputImage.empty() || convDims->filterLoop.empty()) {
+    return false;
+  }
+  // Pooling reduces over a spatial window but does not mix channels.
+  if (!convDims->inputChannel.empty() || !convDims->outputChannel.empty()) {
+    return false;
+  }
+  return hasPoolingLikeBody(linalgOp);
+}
+
 static bool isSupportedContractionOp(linalg::LinalgOp linalgOp) {
   if (!dataTilablePreCondition(linalgOp)) {
     return false;
@@ -198,11 +250,12 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
     }
     auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
     // NOTE: matmul/contraction data tiling is not supported yet on EXSLERATEV2,
-    // so only convolutions are annotated for data tiling for now.
+    // so only convolutions and pooling are annotated for data tiling for now.
     // if (linalgOp && (isSupportedContractionOp(linalgOp) ||
     //                  isSupportedScaledContractionOp(linalgOp) ||
     //                  isSupportedConvolutionOp(linalgOp))) {
-    if (linalgOp && isSupportedConvolutionOp(linalgOp)) {
+    if (linalgOp && (isSupportedConvolutionOp(linalgOp) ||
+                     isSupportedPoolingOp(linalgOp))) {
       candidates.push_back(op);
       return WalkResult::advance();
     }

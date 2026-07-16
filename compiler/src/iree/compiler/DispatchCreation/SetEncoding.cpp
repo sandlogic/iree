@@ -104,10 +104,14 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
   int64_t convInC = 0;
   bool droppedConvPad = false;
 
-  // Set encodings on input operands.
-  SmallVector<Value> encodedInputOperands;
+  // Set encodings on input operands. Seed with the original operands so that
+  // any DPS input WITHOUT an encoding (e.g. a pooling op's shape-only window
+  // operand, for which getEncodingProperties emits no encoding) is carried
+  // through the clone unencoded. `encProps.operands` is ordered by input
+  // position, so idx maps directly to the DPS input index.
+  SmallVector<Value> encodedInputOperands = linalgOp.getDpsInputs();
   for (auto [idx, props] : llvm::enumerate(encProps.operands)) {
-    Value src = linalgOp.getDpsInputs()[idx];
+    Value src = encodedInputOperands[idx];
     if (isConv && idx == 0) {
       if (auto padOp = src.getDefiningOp<tensor::PadOp>()) {
         Value padCst = padOp.getConstantPaddingValue();
@@ -149,7 +153,7 @@ static LogicalResult setDataTilingEncodings(RewriterBase &rewriter,
     }
     Value encoded =
         setEncoding(rewriter, loc, src, props.encoding, props.dynamicValues);
-    encodedInputOperands.push_back(encoded);
+    encodedInputOperands[idx] = encoded;
   }
 
   // Set encoding on init operand.

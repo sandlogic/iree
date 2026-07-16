@@ -170,24 +170,57 @@ SerializableAttr::getEncodingProperties(Operation *op) {
     return props;
   }
 
-  // Return encoding properties for convolution operations.
+  // Return encoding properties for convolution and pooling operations.
   if (linalg::isaConvolutionOpInterface(linalgOp)) {
     auto convDims = linalg::inferConvolutionDims(linalgOp);
     if (failed(convDims) || convDims->outputImage.size() != 2) {
       return failure();
     }
+
+    // Pooling ops share the convolution op interface but have NO channel-mixing
+    // dims (both input and output channel dim sets are empty). Unlike a
+    // convolution they have no weight/filter to encode: only the activation
+    // (CONV_LHS) and the result (CONV_RESULT) are data-tiled; the shape-only
+    // window operand (DPS input 1) is deliberately left unencoded. Reuse the
+    // `conv` op-type so the resolver's existing CONV_LHS/CONV_RESULT layout
+    // applies. This channel check also GUARDS the convolution path below so a
+    // pool op can never fall into it and get an (invalid) CONV_RHS encoding on
+    // its window operand.
+    bool isPooling =
+        convDims->inputChannel.empty() || convDims->outputChannel.empty();
+
     Type lhsElemType = getConvolutionInputTypeWithSignedness(
         builder, linalgOp, linalgOp.getDpsInputOperand(0));
-    Type rhsElemType = getConvolutionInputTypeWithSignedness(
-        builder, linalgOp, linalgOp.getDpsInputOperand(1));
     Type outElemType = getConvolutionInputTypeWithSignedness(
         builder, linalgOp, linalgOp.getDpsInitOperand(0));
-    if (!lhsElemType || !rhsElemType || !outElemType) {
+    if (!lhsElemType || !outElemType) {
       return failure();
     }
-
-    elemTypes = {lhsElemType, rhsElemType, outElemType};
     opType = EncodingOpType::conv;
+
+    if (isPooling) {
+      // Keep the 3-slot conv `element_types` shape for metadata consistency;
+      // the window operand's element type fills the middle (unused RHS) slot.
+      Type midElemType = lhsElemType;
+      if (linalgOp.getNumDpsInputs() > 1) {
+        midElemType = getConvolutionInputTypeWithSignedness(
+            builder, linalgOp, linalgOp.getDpsInputOperand(1));
+        if (!midElemType) {
+          return failure();
+        }
+      }
+      elemTypes = {lhsElemType, midElemType, outElemType};
+      props.operands.push_back(addEncoding(CONV_LHS));
+      props.inits.push_back(addEncoding(CONV_RESULT));
+      return props;
+    }
+
+    Type rhsElemType = getConvolutionInputTypeWithSignedness(
+        builder, linalgOp, linalgOp.getDpsInputOperand(1));
+    if (!rhsElemType) {
+      return failure();
+    }
+    elemTypes = {lhsElemType, rhsElemType, outElemType};
 
     props.operands.push_back(addEncoding(CONV_LHS));
     props.operands.push_back(addEncoding(CONV_RHS));
