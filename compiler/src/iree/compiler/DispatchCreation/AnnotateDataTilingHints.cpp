@@ -29,7 +29,7 @@ struct AnnotateDataTilingHintsPass final
   using Base::Base;
   void runOnOperation() override;
 };
-} // namespace
+}  // namespace
 
 /// Returns true iff the linalgOp has a body like a regular matmul, i.e.
 /// yield(add(out, mul(cast(in0), cast(in1))))
@@ -197,13 +197,8 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
       return WalkResult::interrupt();
     }
     auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
-    // if (linalgOp && (isSupportedContractionOp(linalgOp) ||
-    //                  isSupportedScaledContractionOp(linalgOp) ||
-    //                  isSupportedConvolutionOp(linalgOp))) {
-    //   candidates.push_back(op);
-    //   return WalkResult::advance();
-    // }
-    if (linalgOp && isSupportedConvolutionOp(linalgOp)) {
+    if (linalgOp && (isSupportedContractionOp(linalgOp) ||
+                     isSupportedConvolutionOp(linalgOp))) {
       candidates.push_back(op);
       return WalkResult::advance();
     }
@@ -217,4 +212,4 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
   }
 }
 
-} // namespace mlir::iree_compiler::DispatchCreation
+}  // namespace mlir::iree_compiler::DispatchCreation

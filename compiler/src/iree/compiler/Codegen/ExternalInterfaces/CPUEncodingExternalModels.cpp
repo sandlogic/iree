@@ -702,6 +702,137 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
   return result10D.getDefiningOp();
 }
 
+// Creates the tiled linalg.generic for EXSLERATEV2 matmul. MatMul runs on the
+// NPU conv datapath with KH=KW=1 and 1x1 spatial tiles, so the packed
+// operands (produced by getEncodingInfoForMatmul with {M=1, N=32, K=32}) are
+// all rank-4:
+//   LHS    [M, K/32, 1, 32]    (M -> spatial H, W=1)
+//   RHS    [K/32, N/32, 32, 32] (N -> filter set, K -> channel set)
+//   RESULT [M, N/32, 1, 32]    (M -> spatial H, W=1)
+// The 5-D loop nest matches the collapsed 10-D conv nest (KH=KW=1, tiles 1x1):
+//   d0=ty  d1=fs  d2=cs  d3=filt  d4=c
+static FailureOr<Operation *> lowerExsleratev2MatmulOpWithEncoding(
+    OpBuilder &builder, linalg::LinalgOp linalgOp, ValueRange operands,
+    IREE::Encoding::LayoutMaterializerAttr layoutAttr) {
+  if (!linalgOp.hasPureTensorSemantics()) {
+    return failure();
+  }
+
+  auto inputs = linalgOp.getDpsInputOperands();
+  auto outputs = linalgOp.getDpsInits();
+  if (inputs.size() != 2 || outputs.size() != 1) {
+    return failure();
+  }
+
+  // Require the RHS to carry a matmul encoding to identify matmul ops.
+  auto rhsType = cast<RankedTensorType>(inputs[1]->get().getType());
+  auto rhsEnc = IREE::Encoding::getEncodingAttr(rhsType);
+  if (!rhsEnc ||
+      rhsEnc.getOperandIndex().getValue() != IREE::Encoding::MATMUL_RHS) {
+    return failure();
+  }
+
+  // Packed operands pre-packed by MaterializeDeviceEncoding:
+  //   operands[0]:              LHS    [M, K/32, 1, 32]
+  //   operands[1]:              RHS    [K/32, N/32, 32, 32]
+  //   operands[inputs.size()]:  RESULT [M, N/32, 1, 32]
+  Value packedIn = operands[0];
+  Value packedFilter = operands[1];
+  Value packedOut = operands[inputs.size()];
+  auto packedInTy = cast<RankedTensorType>(packedIn.getType());
+  auto packedFilterTy = cast<RankedTensorType>(packedFilter.getType());
+  auto packedOutTy = cast<RankedTensorType>(packedOut.getType());
+  if (packedInTy.getRank() != 4 || packedFilterTy.getRank() != 4 ||
+      packedOutTy.getRank() != 4) {
+    return failure();
+  }
+
+  Location loc = linalgOp.getLoc();
+  auto d = [&](unsigned i) { return builder.getAffineDimExpr(i); };
+  AffineExpr zero = builder.getAffineConstantExpr(0);
+
+  // Loop dims: d0=ty(M), d1=fs(N/32), d2=cs(K/32), d3=filt(32), d4=c(32).
+  // LHS [M, K/32, 1, 32]:   {d0, d2, 0, d4}
+  AffineMap inputMap = AffineMap::get(5, 0, {d(0), d(2), zero, d(4)},
+                                      builder.getContext());
+  // RHS [N/32, K/32, 32, 32]: {d1, d2, d3, d4}. Note the RHS pack sets
+  // outer_dims_perm=[1,0] (N before K), so the packed dim order is
+  // [N/32, K/32, 32, 32] = [fs, cs, filt, c], not [cs, fs, ...].
+  AffineMap filterMap = AffineMap::get(5, 0, {d(1), d(2), d(3), d(4)},
+                                       builder.getContext());
+  // RESULT [M, N/32, 1, 32]: {d0, d1, 0, d3}
+  AffineMap outputMap = AffineMap::get(5, 0, {d(0), d(1), zero, d(3)},
+                                       builder.getContext());
+
+  SmallVector<utils::IteratorType> iterTypes = {
+      utils::IteratorType::parallel,  // d0: ty
+      utils::IteratorType::parallel,  // d1: fs
+      utils::IteratorType::reduction, // d2: cs
+      utils::IteratorType::parallel,  // d3: filt
+      utils::IteratorType::reduction, // d4: c
+  };
+
+  // The accumulator element type may be wider than the multiplied operands
+  // (e.g. i8/i32 inputs with an i64 accumulator for MatMulInteger). Extend the
+  // product to the init element type before the add.
+  Type i32Ty = builder.getI32Type();
+  Type accTy = packedOutTy.getElementType();
+  auto extToI32 = [&](OpBuilder &nb, Location nb_loc, Value v) -> Value {
+    if (v.getType() == i32Ty) return v;
+    return arith::ExtSIOp::create(nb, nb_loc, i32Ty, v)->getResult(0);
+  };
+  Value result =
+      linalg::GenericOp::create(
+          builder, loc, packedOutTy,
+          ValueRange{packedIn, packedFilter}, ValueRange{packedOut},
+          ArrayRef<AffineMap>{inputMap, filterMap, outputMap}, iterTypes,
+          [&](OpBuilder &nb, Location nb_loc, ValueRange args) {
+            Value lhs = extToI32(nb, nb_loc, args[0]);
+            Value rhs = extToI32(nb, nb_loc, args[1]);
+            Value mul =
+                arith::MulIOp::create(nb, nb_loc, lhs, rhs)->getResult(0);
+            if (mul.getType() != accTy) {
+              mul = arith::ExtSIOp::create(nb, nb_loc, accTy, mul)
+                        ->getResult(0);
+            }
+            Value add =
+                arith::AddIOp::create(nb, nb_loc, mul, args[2])->getResult(0);
+            linalg::YieldOp::create(nb, nb_loc, add);
+          })
+          .getResult(0);
+  Operation *resultOp = result.getDefiningOp();
+  // Stamp the op so LoweringStrategy can route it to the Exsleratev2MatMul
+  // pipeline (the 1x1 tiles erase the floorDiv/mod patterns the conv matcher
+  // relies on).
+  resultOp->setAttr("exsleratev2.tiled_matmul", builder.getUnitAttr());
+  // Record the original logical dims so the CSR lowering can recover M, K, N
+  // without tracing the pack/unpack chain (the packed operands only carry the
+  // padded set-multiple shapes). A [M,K] x [K,N] matmul:
+  //   LHS [M, K] -> exsleratev2.matmul_in_shape = [M, K]
+  //   RHS [K, N] -> exsleratev2.matmul_weight_shape = [K, N]
+  //   RESULT    -> exsleratev2.matmul_out_shape = [M, N]
+  auto lhsType = cast<RankedTensorType>(inputs[0]->get().getType());
+  auto rhsOrigType = cast<RankedTensorType>(inputs[1]->get().getType());
+  auto outType = cast<RankedTensorType>(outputs[0].getType());
+  if (lhsType.getRank() == 2 && rhsOrigType.getRank() == 2 &&
+      outType.getRank() == 2 && lhsType.hasStaticShape() &&
+      rhsOrigType.hasStaticShape() && outType.hasStaticShape()) {
+    resultOp->setAttr(
+        "exsleratev2.matmul_in_shape",
+        builder.getDenseI64ArrayAttr({lhsType.getDimSize(0),
+                                      lhsType.getDimSize(1)}));
+    resultOp->setAttr(
+        "exsleratev2.matmul_weight_shape",
+        builder.getDenseI64ArrayAttr({rhsOrigType.getDimSize(0),
+                                      rhsOrigType.getDimSize(1)}));
+    resultOp->setAttr(
+        "exsleratev2.matmul_out_shape",
+        builder.getDenseI64ArrayAttr({outType.getDimSize(0),
+                                      outType.getDimSize(1)}));
+  }
+  return resultOp;
+}
+
 //===----------------------------------------------------------------------===//
 // Interface methods implementation for iree_cpu.cpu_encoding_resolver.
 //===----------------------------------------------------------------------===//
@@ -1369,6 +1500,20 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
 
     // Only apply EXSLERATEV2 tiling to convolution encodings.
     if (failed(IREE::Encoding::getEncodingConvDims(encoding))) {
+      // Not a convolution: check whether this is a matmul encoding. MatMul
+      // runs on the NPU conv datapath (KH=KW=1), so the data-tiled layout uses
+      // 1x1 spatial tiles and 32-element channel/filter sets:
+      //   LHS [M, K]   -> [M/1,  K/32, 1, 32]   (M -> spatial H, W=1)
+      //   RHS [K, N]   -> [N/32, K/32, 32, 32]  (transposed to filter [N,K])
+      //   RESULT [M, N]-> [M/1,  N/32, 1, 32]   (M -> spatial H, W=1)
+      if (encoding.getOpType().getValue() ==
+          IREE::Encoding::EncodingOpType::matmul) {
+        auto matmulInfo = IREE::Codegen::getEncodingInfoForMatmul(
+            encoding, TileMxNxK{1, 32, 32});
+        if (succeeded(matmulInfo)) {
+          return std::move(matmulInfo.value());
+        }
+      }
       return info;
     }
 
@@ -1482,6 +1627,14 @@ struct Exsleratev2EncodingResolverMaterializerAttr final
     }
 
     if (linalg::isaContractionOpInterface(linalgOp)) {
+      // MatMul runs on the NPU conv datapath (KH=KW=1): lower it to the
+      // EXSLERATEV2 tiled 1x1-conv generic, not the generic mmt4d path.
+      FailureOr<Operation *> matmulOp = lowerExsleratev2MatmulOpWithEncoding(
+          b, linalgOp, convertedOperands,
+          cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
+      if (succeeded(matmulOp)) {
+        return matmulOp.value();
+      }
       return lowerContractionOpWithEncoding(
           b, linalgOp, convertedOperands,
           cast<IREE::Encoding::LayoutMaterializerAttr>(layoutAttr));
