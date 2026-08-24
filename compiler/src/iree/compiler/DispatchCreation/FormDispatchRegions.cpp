@@ -62,6 +62,42 @@ using IREE::LinalgExt::getRootParallelLoopToOpMap;
 //===----------------------------------------------------------------------===//
 
 namespace {
+
+// Attribute stamped by the exsleratev2-unfuse-annotate preprocessing pass to
+// prevent an op from being fused into a dispatch with its producers/consumers.
+constexpr StringLiteral kNoFusionAttrName = "exsleratev2.unfuse";
+
+// Stamp kNoFusionAttrName on relu-like elementwise ops that directly consume a
+// convolution result. This is applied here (immediately before fusion decision
+// making) as a safety net: attributes stamped during preprocessing may be
+// dropped by canonicalization in GlobalOptimization.
+static void stampNoFusionAttrs(FunctionOpInterface funcOp) {
+  funcOp.walk([&](linalg::LinalgOp op) {
+    if (op->hasAttr(kNoFusionAttrName)) return;
+    if (op.getNumLoops() != op.getNumParallelLoops()) return;
+
+    bool consumesConvResult = false;
+    for (Value input : op.getDpsInputs()) {
+      auto producer = input.getDefiningOp<linalg::LinalgOp>();
+      if (producer && linalg::isaConvolutionOpInterface(producer)) {
+        consumesConvResult = true;
+        break;
+      }
+    }
+    if (!consumesConvResult) return;
+
+    bool hasMaxOp = false;
+    op->getRegion(0).walk([&](Operation *bodyOp) {
+      if (isa<arith::MaximumFOp, arith::MaxSIOp, arith::MaxUIOp>(bodyOp)) {
+        hasMaxOp = true;
+      }
+    });
+    if (hasMaxOp) {
+      op->setAttr(kNoFusionAttrName, BoolAttr::get(op->getContext(), true));
+    }
+  });
+}
+
 // `FusionGroup` is used to track operations that are to be fused with a given
 // `rootOp`.
 //
@@ -475,6 +511,12 @@ isFusableWithConsumer(OpOperand &fusedOperand, const FusionTracker &tracker,
   Operation *producer = fusedOperand.get().getDefiningOp();
   Operation *consumer = fusedOperand.getOwner();
 
+  // Never fuse ops that are explicitly marked to stay unfused.
+  if (producer->hasAttr(kNoFusionAttrName) ||
+      consumer->hasAttr(kNoFusionAttrName)) {
+    return false;
+  }
+
   // If consumer is a dequant operation, dont fuse it. These get cloned
   // into their consumers.
   IREE::Flow::CloneableIntoDispatchOptions cloneableOptions;
@@ -687,6 +729,11 @@ static bool isFusableWithProducer(OpOperand &operand,
                                   bool fuseWithTruncate) {
   Operation *producer = operand.get().getDefiningOp();
   Operation *consumer = operand.getOwner();
+
+  if (producer->hasAttr(kNoFusionAttrName) ||
+      consumer->hasAttr(kNoFusionAttrName)) {
+    return false;
+  }
 
   if (!fuseWithTruncate && IREE::LinalgExt::isBitTruncateOp(producer)) {
     return false;
@@ -1054,6 +1101,7 @@ struct FormDispatchRegionsPass final
 void FormDispatchRegionsPass::runOnOperation() {
   mlir::FunctionOpInterface funcOp = getOperation();
   DominanceInfo &dominanceInfo = getAnalysis<DominanceInfo>();
+  stampNoFusionAttrs(funcOp);
   TensorDimTrackingRewriter rewriter(funcOp);
   FormDispatchRegionsPassOptions options{aggressiveFusion, fusePadWithConsumers,
                                          fusePadWithProducers};
