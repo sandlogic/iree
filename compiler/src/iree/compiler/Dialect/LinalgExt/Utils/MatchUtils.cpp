@@ -662,6 +662,41 @@ bool isaEXSLTileConvolutionOpInterface(linalg::LinalgOp linalgOp) {
          detail::MatchEXSLTiledConvolutionResult::Success;
 }
 
+// Returns true iff the generic is the EXSLERATEV2 tiled matmul: 2 packed
+// inputs + 1 packed init, a 5-D loop nest [parallel, parallel, reduction,
+// parallel, reduction], and an RHS input map with 4 results (the packed
+// [N/32, K/32, 32, 32] filter). This is the structural signature produced by
+// lowerExsleratev2MatmulOpWithEncoding, used to route the tiled matmul to the
+// Exsleratev2MatMul pipeline without an explicit marker attribute.
+bool isaEXSLTileMatmulOpInterface(linalg::LinalgOp linalgOp) {
+  auto genericOp = dyn_cast_or_null<linalg::GenericOp>(
+      linalgOp ? linalgOp.getOperation() : nullptr);
+  if (!genericOp) {
+    return false;
+  }
+  if (genericOp.getNumDpsInputs() != 2 || genericOp.getNumDpsInits() != 1) {
+    return false;
+  }
+  auto iterTypes = genericOp.getIteratorTypesArray();
+  if (iterTypes.size() != 5) {
+    return false;
+  }
+  // d0=ty(par) d1=fs(par) d2=cs(red) d3=filt(par) d4=c(red)
+  if (iterTypes[0] != utils::IteratorType::parallel ||
+      iterTypes[1] != utils::IteratorType::parallel ||
+      iterTypes[2] != utils::IteratorType::reduction ||
+      iterTypes[3] != utils::IteratorType::parallel ||
+      iterTypes[4] != utils::IteratorType::reduction) {
+    return false;
+  }
+  auto maps = genericOp.getIndexingMapsArray();
+  if (maps.size() < 2) {
+    return false;
+  }
+  // The packed RHS map has 4 results: [fs, cs, filt, c].
+  return maps[1].getNumResults() == 4;
+}
+
 FailureOr<linalg::ConvolutionDimensions> inferConvolutionDimsImpl(
     ArrayRef<AffineMap> indexingMaps, ArrayRef<utils::IteratorType> iterators,
     ConvAccessExprWalker &inputExprWalker, bool allowEmptyConvolvedDims) {
