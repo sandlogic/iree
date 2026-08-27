@@ -67,6 +67,12 @@ defaultConvBuilderFn(OpBuilder &b, Location loc, linalg::LinalgOp srcConv,
   indexingMaps.push_back(newOutputMap);
   auto genericConv = linalg::GenericOp::create(b, loc, output.getType(), inputs,
                                                output, indexingMaps, iterators);
+  for (NamedAttribute attr : srcConv->getAttrs()) {
+    StringRef name = attr.getName().getValue();
+    if (name.starts_with("exsleratev2.")) {
+      genericConv->setAttr(attr.getName(), attr.getValue());
+    }
+  }
   IRMapping mapper;
   srcConv->getRegion(0).cloneInto(&genericConv.getRegion(), mapper);
   return genericConv.getResult(0);

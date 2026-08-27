@@ -95,6 +95,8 @@ void GeneralizeLinalgNamedOpsPass::runOnOperation() {
     }
 
     Attribute tileSelectAttr = linalgOp->getAttr("exsleratev2.tile_select");
+    Attribute tileSelectHwAttr =
+        linalgOp->getAttr("exsleratev2.tile_select_hw");
 
     FailureOr<linalg::GenericOp> generalizedOp =
         linalg::generalizeNamedOp(rewriter, linalgOp);
@@ -108,6 +110,10 @@ void GeneralizeLinalgNamedOpsPass::runOnOperation() {
     }
     if (tileSelectAttr) {
       generalizedOp.value()->setAttr("exsleratev2.tile_select", tileSelectAttr);
+    }
+    if (tileSelectHwAttr) {
+      generalizedOp.value()->setAttr("exsleratev2.tile_select_hw",
+                                     tileSelectHwAttr);
     }
   }
 }

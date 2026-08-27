@@ -430,6 +430,9 @@ fuseContractionsHorizontally(RewriterBase &rewriter, Location loc,
   if (auto tsa = linalgOps.front()->getAttr("exsleratev2.tile_select")) {
     fusedOp->setAttr("exsleratev2.tile_select", tsa);
   }
+  if (auto tsaHw = linalgOps.front()->getAttr("exsleratev2.tile_select_hw")) {
+    fusedOp->setAttr("exsleratev2.tile_select_hw", tsaHw);
+  }
 
   Block *fusedBody = fusedOp.getBlock();
   int64_t rhsIndex = 0;

@@ -148,7 +148,8 @@ def EncodingAttr :
   let assemblyFormat = [{
     `<`
     struct($operand_index, $op_type, $element_types, $original_element_type,
-           $user_indexing_maps, custom<DynamicI64ArrayAttr>($iteration_sizes))
+           $user_indexing_maps, custom<DynamicI64ArrayAttr>($iteration_sizes),
+           $conv_tile_sizes)
     `>`
   }];
 
@@ -159,7 +160,8 @@ def EncodingAttr :
     OptionalParameter<"TypeAttr", "original element type before bitcast packing">:$original_element_type,
     OptionalParameter<"ArrayAttr", "Indexing maps of the operation using this tensor">:$user_indexing_maps,
     OptionalParameter<"ArrayAttr", "The original operation's iteration sizes. "
-    "This is useful for handling skinny dimension sizes">:$iteration_sizes
+    "This is useful for handling skinny dimension sizes">:$iteration_sizes,
+    OptionalParameter<"DenseI64ArrayAttr", "">:$conv_tile_sizes
   );
 
   let builders = [
@@ -168,7 +170,8 @@ def EncodingAttr :
         "ArrayRef<Type>":$elemTypes,
         CArg<"Type", "{}">:$originalElementType,
         CArg<"ArrayRef<AffineMap>", "{}">:$maps,
-        CArg<"ArrayRef<int64_t>", "{}">:$iterationSizes)>
+        CArg<"ArrayRef<int64_t>", "{}">:$iterationSizes,
+        CArg<"ArrayRef<int64_t>", "{}">:$convTileSizes)>
   ];
 
   let extraClassDeclaration = [{
@@ -194,6 +197,8 @@ def EncodingAttr :
 
     /// Returns an integer array with values in `iteration_sizes`.
     SmallVector<int64_t> getIterationSizesArray() const;
+
+    SmallVector<int64_t> getConvTileSizesArray() const;
 
     /// Returns a vector with values in `element_types`.
     SmallVector<Type> getElementTypesArray() const;

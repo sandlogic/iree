@@ -247,7 +247,8 @@ EncodingAttr EncodingAttr::get(MLIRContext *ctx, int64_t operandIndex,
                                EncodingOpType opType, ArrayRef<Type> elemTypes,
                                Type originalElementType,
                                ArrayRef<AffineMap> maps,
-                               ArrayRef<int64_t> iterationSizes) {
+                               ArrayRef<int64_t> iterationSizes,
+                               ArrayRef<int64_t> convTileSizes) {
   Builder b(ctx);
   auto opTypeAttr = EncodingOpTypeAttr::get(ctx, opType);
   auto originalElementTypeAttr =
@@ -255,16 +256,20 @@ EncodingAttr EncodingAttr::get(MLIRContext *ctx, int64_t operandIndex,
   auto mapsAttr = maps.empty() ? ArrayAttr() : b.getAffineMapArrayAttr(maps);
   auto iterationSizesAttr =
       iterationSizes.empty() ? ArrayAttr() : b.getI64ArrayAttr(iterationSizes);
+  auto convTileSizesAttr = convTileSizes.empty()
+                               ? DenseI64ArrayAttr()
+                               : b.getDenseI64ArrayAttr(convTileSizes);
   return get(ctx, b.getIndexAttr(operandIndex), opTypeAttr,
              b.getTypeArrayAttr(elemTypes), originalElementTypeAttr, mapsAttr,
-             iterationSizesAttr);
+             iterationSizesAttr, convTileSizesAttr);
 }
 
 LogicalResult EncodingAttr::verify(
     function_ref<mlir::InFlightDiagnostic()> emitError,
     IntegerAttr operandIndexAttr, EncodingOpTypeAttr opTypeAttr,
     ArrayAttr elementTypesAttr, TypeAttr originalElementTypeAttr,
-    ArrayAttr userIndexingMapsAttr, ArrayAttr iterationSizesAttr) {
+    ArrayAttr userIndexingMapsAttr, ArrayAttr iterationSizesAttr,
+    DenseI64ArrayAttr convTileSizesAttr) {
   AffineMap indexingMap;
   if (userIndexingMapsAttr) {
     unsigned operandIndex = operandIndexAttr.getValue().getZExtValue();
@@ -296,6 +301,20 @@ LogicalResult EncodingAttr::verify(
                          << " iteration sizes, but expected "
                          << indexingMap.getNumDims()
                          << " based on the user indexing maps";
+    }
+  }
+  if (convTileSizesAttr) {
+    if (convTileSizesAttr.size() != 2) {
+      return emitError() << "expected `conv_tile_sizes` to have exactly 2 "
+                            "elements [tileH, tileW], but got "
+                         << convTileSizesAttr.size();
+    }
+    for (int64_t tile : convTileSizesAttr.asArrayRef()) {
+      if (tile <= 0) {
+        return emitError()
+               << "expected `conv_tile_sizes` entries to be positive, but got "
+               << tile;
+      }
     }
   }
   return success();
@@ -365,6 +384,14 @@ SmallVector<int64_t> EncodingAttr::getIterationSizesArray() const {
   });
 }
 
+SmallVector<int64_t> EncodingAttr::getConvTileSizesArray() const {
+  DenseI64ArrayAttr convTileSizes = getConvTileSizes();
+  if (!convTileSizes) {
+    return {};
+  }
+  return SmallVector<int64_t>(convTileSizes.asArrayRef());
+}
+
 SmallVector<Type> EncodingAttr::getElementTypesArray() const {
   return llvm::map_to_vector(getElementTypes().getValue(), [](Attribute a) {
     return cast<TypeAttr>(a).getValue();
@@ -390,7 +417,7 @@ EncodingAttr::cloneWithNewOperandIndexingMap(AffineMap newIndexingMap) {
   newMaps[operandIndex] = ArrayAttr::get(getContext(), maps);
   return get(getContext(), getOperandIndex(), getOpType(), getElementTypes(),
              getOriginalElementType(), ArrayAttr::get(getContext(), newMaps),
-             getIterationSizes());
+             getIterationSizes(), getConvTileSizes());
 }
 
 bool EncodingAttr::isSerialized() const { return false; }
@@ -464,7 +491,7 @@ EncodingAttr::convertForBitcast(ArrayRef<int64_t> shape,
   EncodingAttr newEncoding = EncodingAttr::get(
       getContext(), getOperandIndex().getValue().getZExtValue(),
       getOpType().getValue(), getElementTypesArray(), origElemType,
-      getRootMaps(), getIterationSizesArray());
+      getRootMaps(), getIterationSizesArray(), getConvTileSizesArray());
   return BitcastEncodingInfo{*newShape, newEncoding};
 }
 

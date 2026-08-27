@@ -112,10 +112,22 @@ SerializableAttr::getEncodingProperties(Operation *op) {
   // Extract dynamic loop dimensions.
   SmallVector<Value> dynamicDims = getDynamicLoopDims(builder, linalgOp);
 
-  auto addEncoding = [&](int64_t operandIndex) {
+  SmallVector<int64_t> inTile, outTile;
+  if (auto tileHw =
+          op->getAttrOfType<DenseI64ArrayAttr>("exsleratev2.tile_select_hw")) {
+    if (tileHw.size() == 4) {
+      ArrayRef<int64_t> t = tileHw.asArrayRef();
+      inTile = {t[0], t[1]};
+      outTile = {t[2], t[3]};
+    }
+  }
+
+  auto addEncoding = [&](int64_t operandIndex,
+                         ArrayRef<int64_t> convTileSizes = {}) {
     return EncodingProperties{
         EncodingAttr::get(ctx, operandIndex, opType, elemTypes,
-                          /*originalElementType=*/{}, maps, iterationSizes),
+                          /*originalElementType=*/{}, maps, iterationSizes,
+                          convTileSizes),
         dynamicDims};
   };
 
@@ -210,8 +222,8 @@ SerializableAttr::getEncodingProperties(Operation *op) {
         }
       }
       elemTypes = {lhsElemType, midElemType, outElemType};
-      props.operands.push_back(addEncoding(CONV_LHS));
-      props.inits.push_back(addEncoding(CONV_RESULT));
+      props.operands.push_back(addEncoding(CONV_LHS, inTile));
+      props.inits.push_back(addEncoding(CONV_RESULT, outTile));
       return props;
     }
 
@@ -222,9 +234,9 @@ SerializableAttr::getEncodingProperties(Operation *op) {
     }
     elemTypes = {lhsElemType, rhsElemType, outElemType};
 
-    props.operands.push_back(addEncoding(CONV_LHS));
+    props.operands.push_back(addEncoding(CONV_LHS, inTile));
     props.operands.push_back(addEncoding(CONV_RHS));
-    props.inits.push_back(addEncoding(CONV_RESULT));
+    props.inits.push_back(addEncoding(CONV_RESULT, outTile));
     return props;
   }
 

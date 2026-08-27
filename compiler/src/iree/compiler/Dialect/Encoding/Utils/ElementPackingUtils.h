@@ -43,24 +43,6 @@ Value calculateStorageElementOffsetInBytes(Location loc,
                                            Value linearizedIndex,
                                            OpBuilder &builder);
 
-/// Registers dynamic output tile sizes (tileH, tileW) for an i8 activation
-/// tensor with spatial shape (C, H, W).  Called by the Exsleratev2
-/// tile-selector pass at preprocessing time so that
-/// calculateStorageElementCountInBytes uses per-op tile sizes instead of
-/// the hardware-default fallback (TILE_H=8, TILE_W=4).
-void registerExsleratev2TileSizes(int64_t C, int64_t H, int64_t W,
-                                  int64_t tileH, int64_t tileW);
-
-/// Registers the packed byte size for a flattened rank-2 alias of an i8
-/// activation tensor. This preserves storage size across reshape/collapse from
-/// tiled CHW tensors to CxHW views.
-void registerExsleratev2FlattenedShapeBytes(int64_t dim0, int64_t dim1,
-                                            int64_t bytes);
-
-/// Clears all registered tile sizes.  Call at the start of each compilation
-/// to prevent stale entries from a previous run leaking into the next.
-void clearExsleratev2TileSizes();
-
 } // namespace mlir::iree_compiler
 
 #endif // IREE_COMPILER_DIALECT_ENCODING_UTILS_ELEMENTPACKINGUTILS_H_

@@ -254,6 +254,9 @@ public:
     if (auto tsa = genericOp->getAttr("exsleratev2.tile_select")) {
       newGenericOp->setAttr("exsleratev2.tile_select", tsa);
     }
+    if (auto tsaHw = genericOp->getAttr("exsleratev2.tile_select_hw")) {
+      newGenericOp->setAttr("exsleratev2.tile_select_hw", tsaHw);
+    }
     rewriter.cloneRegionBefore(genericOp.getRegion(), newGenericOp.getRegion(),
                                newGenericOp.getRegion().begin());
 

@@ -501,18 +501,26 @@ void FoldUnitExtentDimsPass::runOnOperation() {
   // batch=1 from conv/pool ops) without copying discardable attrs. We map the
   // pre-fold result RankedTensorType → tile_select so we can restore after
   // folding.
-  llvm::SmallVector<std::pair<RankedTensorType, Attribute>> tileSelectEntries;
+  struct TileSelectEntry {
+    RankedTensorType type;
+    Attribute attr;
+    Attribute hwAttr;
+  };
+  llvm::SmallVector<TileSelectEntry> tileSelectEntries;
   moduleOp.walk([&](linalg::GenericOp genericOp) {
     if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp)) {
       return;
     }
     Attribute tileSelectAttr = genericOp->getAttr("exsleratev2.tile_select");
-    if (!tileSelectAttr) {
+    Attribute tileSelectHwAttr =
+        genericOp->getAttr("exsleratev2.tile_select_hw");
+    if (!tileSelectAttr && !tileSelectHwAttr) {
       return;
     }
     for (OpResult result : genericOp->getResults()) {
       if (auto tensorType = dyn_cast<RankedTensorType>(result.getType())) {
-        tileSelectEntries.emplace_back(tensorType, tileSelectAttr);
+        tileSelectEntries.push_back(
+            {tensorType, tileSelectAttr, tileSelectHwAttr});
       }
     }
   });
@@ -543,7 +551,14 @@ void FoldUnitExtentDimsPass::runOnOperation() {
       if (!IREE::Flow::isNonNullAndOutsideDispatch(genericOp)) {
         return;
       }
-      if (genericOp->hasAttr("exsleratev2.tile_select")) {
+      if (genericOp->hasAttr("exsleratev2.tile_select") &&
+          genericOp->hasAttr("exsleratev2.tile_select_hw")) {
+        return;
+      }
+      if (llvm::none_of(genericOp.getIteratorTypesArray(),
+                        [](utils::IteratorType it) {
+                          return it == utils::IteratorType::reduction;
+                        })) {
         return;
       }
       for (OpResult result : genericOp->getResults()) {
@@ -551,7 +566,7 @@ void FoldUnitExtentDimsPass::runOnOperation() {
         if (!newType) {
           continue;
         }
-        for (auto &[savedType, attr] : tileSelectEntries) {
+        for (auto &[savedType, attr, hwAttr] : tileSelectEntries) {
           ArrayRef<int64_t> savedShape = savedType.getShape();
           ArrayRef<int64_t> newShape = newType.getShape();
           // Match: saved type is the pre-fold type with leading 1 stripped.
@@ -567,7 +582,12 @@ void FoldUnitExtentDimsPass::runOnOperation() {
           if (savedType.getElementType() != newType.getElementType()) {
             continue;
           }
-          genericOp->setAttr("exsleratev2.tile_select", attr);
+          if (attr) {
+            genericOp->setAttr("exsleratev2.tile_select", attr);
+          }
+          if (hwAttr) {
+            genericOp->setAttr("exsleratev2.tile_select_hw", hwAttr);
+          }
           return;
         }
       }

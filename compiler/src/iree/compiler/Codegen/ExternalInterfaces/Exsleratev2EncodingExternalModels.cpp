@@ -61,6 +61,30 @@ static constexpr int64_t kExslTileW = 8;
 static constexpr int64_t kExslChSet = 32;   // CHANNEL_SET_SIZE
 static constexpr int64_t kExslFiltSet = 32; // FILTER_SET_SIZE
 
+static std::pair<int64_t, int64_t>
+exslSpatialTile(IREE::Encoding::EncodingAttr encoding) {
+  if (encoding) {
+    SmallVector<int64_t> tile = encoding.getConvTileSizesArray();
+    if (tile.size() == 2 && tile[0] > 0 && tile[1] > 0) {
+      return {tile[0], tile[1]};
+    }
+  }
+  return {kExslTileH, kExslTileW};
+}
+
+static std::pair<int64_t, int64_t> exslTileFromPackedType(Value packed) {
+  if (auto ty = dyn_cast<RankedTensorType>(packed.getType())) {
+    if (ty.getRank() == 6) {
+      ArrayRef<int64_t> shape = ty.getShape();
+      if (!ShapedType::isDynamic(shape[3]) &&
+          !ShapedType::isDynamic(shape[4])) {
+        return {shape[3], shape[4]};
+      }
+    }
+  }
+  return {kExslTileH, kExslTileW};
+}
+
 // Return the coefficient of affine dim `dimIdx` in `expr`.
 // Handles d*c, c*d, and additive compositions thereof.
 static int64_t exslExtractStride(AffineExpr expr, unsigned dimIdx) {
@@ -106,9 +130,10 @@ static int64_t defaultStride(int64_t stride) {
 // Returns `packedIn` unchanged when no halo is needed.
 static Value padPackedInputHalo(OpBuilder &builder, Location loc,
                                 Value packedIn, int64_t kH, int64_t kW,
-                                TypedAttr padValue) {
-  int64_t extraH = (kH + kExslTileH - 2) / kExslTileH;
-  int64_t extraW = (kW + kExslTileW - 2) / kExslTileW;
+                                TypedAttr padValue, int64_t tileH,
+                                int64_t tileW) {
+  int64_t extraH = (kH + tileH - 2) / tileH;
+  int64_t extraW = (kW + tileW - 2) / tileW;
   if (extraH == 0 && extraW == 0) {
     return packedIn;
   }
@@ -145,7 +170,8 @@ static Value emitPackedInputExtract(OpBuilder &nb, Location loc, Value packedIn,
                                     Value tyBase, Value txBase, Value innerY,
                                     Value innerX, Value ky, Value kx,
                                     Value chan, Value innerC, int64_t strideH,
-                                    int64_t strideW) {
+                                    int64_t strideW, int64_t tileH,
+                                    int64_t tileW) {
   auto cstIdx = [&](int64_t v) -> Value {
     return arith::ConstantIndexOp::create(nb, loc, v);
   };
@@ -153,23 +179,22 @@ static Value emitPackedInputExtract(OpBuilder &nb, Location loc, Value packedIn,
       nb, loc,
       arith::AddIOp::create(
           nb, loc,
-          arith::MulIOp::create(nb, loc, tyBase, cstIdx(kExslTileH * strideH)),
+          arith::MulIOp::create(nb, loc, tyBase, cstIdx(tileH * strideH)),
           arith::MulIOp::create(nb, loc, innerY, cstIdx(strideH))),
       ky);
   Value iw = arith::AddIOp::create(
       nb, loc,
       arith::AddIOp::create(
           nb, loc,
-          arith::MulIOp::create(nb, loc, txBase, cstIdx(kExslTileW * strideW)),
+          arith::MulIOp::create(nb, loc, txBase, cstIdx(tileW * strideW)),
           arith::MulIOp::create(nb, loc, innerX, cstIdx(strideW))),
       kx);
-  Value iyDiv = arith::DivUIOp::create(nb, loc, iy, cstIdx(kExslTileH));
-  Value iyRem = arith::RemUIOp::create(nb, loc, iy, cstIdx(kExslTileH));
-  Value iwDiv = arith::DivUIOp::create(nb, loc, iw, cstIdx(kExslTileW));
-  Value iwRem = arith::RemUIOp::create(nb, loc, iw, cstIdx(kExslTileW));
+  Value iyDiv = arith::DivUIOp::create(nb, loc, iy, cstIdx(tileH));
+  Value iyRem = arith::RemUIOp::create(nb, loc, iy, cstIdx(tileH));
+  Value iwDiv = arith::DivUIOp::create(nb, loc, iw, cstIdx(tileW));
+  Value iwRem = arith::RemUIOp::create(nb, loc, iw, cstIdx(tileW));
   return tensor::ExtractOp::create(
-      nb, loc, packedIn,
-      ValueRange{iyDiv, iwDiv, chan, iyRem, iwRem, innerC});
+      nb, loc, packedIn, ValueRange{iyDiv, iwDiv, chan, iyRem, iwRem, innerC});
 }
 
 // Creates the 10-D tiled linalg.generic for EXSLERATEV2 convolution.
@@ -267,6 +292,8 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
   Value packedOut = operands[inputs.size()];
   Location loc = linalgOp.getLoc();
 
+  auto [convTileH, convTileW] = exslTileFromPackedType(packedIn);
+
   // Add the spatial halo tiles the stencil may reach. Kernel extent comes from
   // the packed filter layout [F/32, KH, KW, IC/32, 32, 32]. Pad value is 0: the
   // halo never contributes to the mul-add accumulator at runtime.
@@ -275,8 +302,9 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
     int64_t kH = packedFilterTy.getShape()[1];
     int64_t kW = packedFilterTy.getShape()[2];
     Type elemTy = cast<RankedTensorType>(packedIn.getType()).getElementType();
-    packedIn = padPackedInputHalo(builder, loc, packedIn, kH, kW,
-                                  builder.getZeroAttr(elemTy));
+    packedIn =
+        padPackedInputHalo(builder, loc, packedIn, kH, kW,
+                           builder.getZeroAttr(elemTy), convTileH, convTileW);
   }
 
   auto packedOutType = cast<RankedTensorType>(packedOut.getType());
@@ -318,7 +346,7 @@ static FailureOr<Operation *> lowerExsleratev2ConvolutionOpWithEncoding(
                 nb, nb_loc, capturedIn, /*tyBase=*/idx(0), /*txBase=*/idx(1),
                 /*innerY=*/idx(6), /*innerX=*/idx(7), /*ky=*/idx(3),
                 /*kx=*/idx(4), /*chan=*/idx(5), /*innerC=*/idx(9), strideH,
-                strideW);
+                strideW, convTileH, convTileW);
             Value lhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, inVal);
             Value rhs = arith::ExtSIOp::create(nb, nb_loc, i32Ty, args[0]);
             Value mul = arith::MulIOp::create(nb, nb_loc, lhs, rhs);
@@ -442,6 +470,8 @@ static FailureOr<Operation *> lowerExsleratev2PoolingOpWithEncoding(
   Value window = operands[1];
   Value packedOut = operands[inputs.size()];
 
+  auto [poolTileH, poolTileW] = exslTileFromPackedType(packedIn);
+
   // Add the spatial halo tiles the stencil may reach (same scheme as conv).
   // Kernel extent comes from the shape-only window operand. Pad value is the
   // max-reduction identity (−inf for float, signed min for int) so a halo read
@@ -460,7 +490,8 @@ static FailureOr<Operation *> lowerExsleratev2PoolingOpWithEncoding(
       unsigned bw = padElemTy.getIntOrFloatBitWidth();
       minAttr = builder.getIntegerAttr(padElemTy, APInt::getSignedMinValue(bw));
     }
-    packedIn = padPackedInputHalo(builder, loc, packedIn, kH, kW, minAttr);
+    packedIn = padPackedInputHalo(builder, loc, packedIn, kH, kW, minAttr,
+                                  poolTileH, poolTileW);
   }
 
   auto packedOutType = cast<RankedTensorType>(packedOut.getType());
@@ -481,7 +512,7 @@ static FailureOr<Operation *> lowerExsleratev2PoolingOpWithEncoding(
                 nb, nb_loc, capturedIn, /*tyBase=*/idx(0), /*txBase=*/idx(1),
                 /*innerY=*/idx(5), /*innerX=*/idx(6), /*ky=*/idx(3),
                 /*kx=*/idx(4), /*chan=*/idx(2), /*innerC=*/idx(7), strideH,
-                strideW);
+                strideW, poolTileH, poolTileW);
             // args = [window_val (ignored), out_accumulator].
             Value maxVal;
             if (isFloatPool) {
@@ -506,13 +537,11 @@ static FailureOr<Operation *> lowerExsleratev2PoolingOpWithEncoding(
                             {winTy.getShape()[0], winTy.getShape()[1]}));
   }
   if (lhsType.getRank() >= 3) {
-    result8DOp->setAttr(
-        "exsleratev2.pool_in_hw",
-        builder.getDenseI64ArrayAttr(
-            {lhsType.getShape()[0], lhsType.getShape()[1]}));
-    result8DOp->setAttr(
-        "exsleratev2.pool_in_c",
-        builder.getDenseI64ArrayAttr({lhsType.getShape()[2]}));
+    result8DOp->setAttr("exsleratev2.pool_in_hw",
+                        builder.getDenseI64ArrayAttr(
+                            {lhsType.getShape()[0], lhsType.getShape()[1]}));
+    result8DOp->setAttr("exsleratev2.pool_in_c",
+                        builder.getDenseI64ArrayAttr({lhsType.getShape()[2]}));
   }
   return result8DOp;
 }
@@ -567,17 +596,19 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
       return info;
     }
 
+    auto [tileH, tileW] = exslSpatialTile(encoding);
+
     unsigned opIdx = encoding.getOperandIndex().getValue().getZExtValue();
     if (opIdx == IREE::Encoding::CONV_LHS) {
       if (isNHWC) {
         // NHWC [H, W, C] → [H/tH, W/tW, C/32, tH, tW, 32]
         info.innerDimsPos = {0, 1, 2};
-        info.innerTileSizes = {kExslTileH, kExslTileW, kExslChSet};
+        info.innerTileSizes = {tileH, tileW, kExslChSet};
       } else {
         // NCHW [C, H, W] → [H/tH, W/tW, C/32, tH, tW, 32] (spatial-tile-major,
         // matches runtime)
         info.innerDimsPos = {1, 2, 0};
-        info.innerTileSizes = {kExslTileH, kExslTileW, kExslChSet};
+        info.innerTileSizes = {tileH, tileW, kExslChSet};
         info.outerDimsPerm = {1, 2, 0};
       }
     } else if (opIdx == IREE::Encoding::CONV_RHS) {
@@ -622,14 +653,14 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
         // output format.
         if (isNHWC) {
           info.innerDimsPos = {0, 1, 2};
-          info.innerTileSizes = {kExslTileH, kExslTileW, kExslFiltSet};
+          info.innerTileSizes = {tileH, tileW, kExslFiltSet};
           // outerDimsPerm must be explicit identity — empty perm causes
           // outInverseOuterDimsPerm[] OOB access in
           // lowerGenericOpWithResolvedLayouts.
           info.outerDimsPerm = {0, 1, 2};
         } else {
           info.innerDimsPos = {1, 2, 0};
-          info.innerTileSizes = {kExslTileH, kExslTileW, kExslFiltSet};
+          info.innerTileSizes = {tileH, tileW, kExslFiltSet};
           info.outerDimsPerm = {1, 2, 0};
         }
       }
