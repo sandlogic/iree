@@ -249,12 +249,12 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
       return WalkResult::interrupt();
     }
     auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
-    // NOTE: matmul/contraction data tiling is not supported yet on EXSLERATEV2,
-    // so only convolutions and pooling are annotated for data tiling for now.
-    // if (linalgOp && (isSupportedContractionOp(linalgOp) ||
-    //                  isSupportedScaledContractionOp(linalgOp) ||
-    //                  isSupportedConvolutionOp(linalgOp))) {
-    if (linalgOp && (isSupportedConvolutionOp(linalgOp) ||
+    // NOTE: matmul/contraction data tiling was not supported on EXSLERATEV2
+    // before matmul data-tiling support landed (1x1 tiles on the conv
+    // datapath); it is now enabled alongside convolutions and pooling.
+    if (linalgOp && (isSupportedContractionOp(linalgOp) ||
+                     isSupportedScaledContractionOp(linalgOp) ||
+                     isSupportedConvolutionOp(linalgOp) ||
                      isSupportedPoolingOp(linalgOp))) {
       candidates.push_back(op);
       return WalkResult::advance();
