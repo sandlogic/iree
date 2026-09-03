@@ -29,7 +29,7 @@ struct AnnotateDataTilingHintsPass final
   using Base::Base;
   void runOnOperation() override;
 };
-} // namespace
+}  // namespace
 
 /// Returns true iff the linalgOp has a body like a regular matmul, i.e.
 /// yield(add(out, mul(cast(in0), cast(in1))))
@@ -269,4 +269,4 @@ void AnnotateDataTilingHintsPass::runOnOperation() {
   }
 }
 
-} // namespace mlir::iree_compiler::DispatchCreation
+}  // namespace mlir::iree_compiler::DispatchCreation
