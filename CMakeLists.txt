@@ -892,6 +892,15 @@ if(IREE_BUILD_PYTHON_BINDINGS)
 endif()
 
 if(NOT IREE_BUILD_COMPILER)
+  # Compiler C bindings are always configured, even in runtime-only builds.
+  # Keep their include-setup dependency as a CMake target so shared-library
+  # builds do not misinterpret it as a physical -lIREELLVMIncludeSetup library.
+  add_library(IREELLVMIncludeSetup INTERFACE)
+  iree_install_targets(
+    TARGETS IREELLVMIncludeSetup
+    COMPONENT IREEPublicLibraries-Compiler
+    EXPORT_SET Compiler
+  )
   message(STATUS "Not adding LLVM/MLIR because the configuration does not require it")
 else()
   # Force enable BUILD_SHARED_LIBS for the compiler if instructed.

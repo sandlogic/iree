@@ -471,6 +471,7 @@ if(IREE_BUILD_COMPILER)
   SRCS
     "iree-dump-slfb-main.cc"
   DEPS
+    iree::schemas::exsleratev2_c_fbs
     iree::schemas::exsleratev2_executable_def_c_fbs
     iree::base::internal::flatcc::parsing
   INSTALL_COMPONENT IREETools-Runtime

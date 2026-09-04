@@ -1,0 +1,138 @@
+// Experimental ExslLL-native executable schema.
+// This is intentionally separate from exsleratev2_executable_def.fbs so the
+// legacy runtime/compiler flow remains available while the LL path evolves.
+namespace iree.exsleratev2.hal.exsleratev2_ll;
+
+enum LayerKind : uint8 {
+  conv = 0,
+  pool = 1,
+  matmul = 2,
+  add = 3,
+  fully_connected = 4,
+  cpu = 5,
+  skip = 6,
+  reduce = 7
+}
+
+enum ExecutionMode : uint8 {
+  exslerate = 0,
+  cpu = 1,
+  skip = 2
+}
+
+enum ElementType : uint8 {
+  i8 = 0,
+  f32 = 1,
+  i32 = 2
+}
+
+enum DataCategory : uint8 {
+  weights = 0,
+  bias = 1,
+  input = 2,
+  output = 3,
+  atomic_bank = 4,
+  atomic_offset = 5,
+  lifetime = 6,
+  bnweight = 7,
+  bnbias = 8,
+  lut = 9
+}
+
+table EntryPointDef {
+  name: string;
+  ordinal: uint32;
+  layer_index: uint32;
+}
+
+table ExecutionDef {
+  mode: ExecutionMode = exslerate;
+  kernel_name: string;
+}
+
+table TileDef {
+  input_tile_height: uint32 = 0;
+  input_tile_width: uint32 = 0;
+  output_tile_height: uint32 = 0;
+  output_tile_width: uint32 = 0;
+  input_tile_buffer_size: uint32 = 0;
+}
+
+table QuantDef {
+  quant_scale: float = 0.0;
+  quant_zero_point: int32 = 0;
+  leaky_relu_alpha: float = 0.0;
+  requant_output_scale: float = 0.0;
+  dequant_scale: float = 0.0;
+}
+
+table BindingDef {
+  activation_binding_index: uint32 = 0;
+  has_filter_binding: bool = false;
+  filter_binding_index: uint32 = 0;
+  filter_byte_offset: uint64 = 0;
+  has_bias_binding: bool = false;
+  bias_binding_index: uint32 = 0;
+  bias_byte_offset: uint64 = 0;
+}
+
+table BufferInfoDef {
+  input_byte_size: uint64 = 0;
+  input_element_type: ElementType = i8;
+  output_byte_size: uint64 = 0;
+  output_element_type: ElementType = i8;
+}
+
+table LayoutDef {
+  skip_input_tiling: bool = false;
+  skip_output_detiling: bool = false;
+  output_layout_chw: bool = false;
+}
+
+table LayerMetaDef {
+  input_tile_buffer: uint32 = 0;
+  input_offset: uint32 = 0;
+  output_offset: uint32 = 0;
+  num_channel: uint32 = 0;
+  num_filter: uint32 = 0;
+}
+
+table CsrEntryDef {
+  address: uint32;
+  value: uint32;
+  name: string;
+}
+
+table CsrMapDef {
+  entries: [CsrEntryDef];
+}
+
+table DataBufferDef {
+  category: DataCategory;
+  element_type: ElementType;
+  i8_data: [int8];
+  i32_data: [int32];
+  u32_data: [uint32];
+}
+
+table LayerDef {
+  kind: LayerKind = conv;
+  execution: ExecutionDef;
+  tiles: TileDef;
+  quant: QuantDef;
+  bindings: BindingDef;
+  buffer_info: BufferInfoDef;
+  layout: LayoutDef;
+  meta: LayerMetaDef;
+  csr_map: CsrMapDef;
+  data_buffers: [DataBufferDef];
+}
+
+table ExecutableDef {
+  entry_points: [EntryPointDef];
+  layers: [LayerDef];
+  cpu_code: [uint8];
+  cpu_function_name: string;
+}
+
+root_type ExecutableDef;

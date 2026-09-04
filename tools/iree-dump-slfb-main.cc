@@ -1,16 +1,98 @@
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 
 #include "iree/base/internal/flatcc/parsing.h"
+#include "iree/schemas/exsleratev2_builder.h"
 #include "iree/schemas/exsleratev2_executable_def_builder.h"
 #include "iree/schemas/exsleratev2_executable_def_reader.h"
 #include "iree/schemas/exsleratev2_executable_def_verifier.h"
+#include "iree/schemas/exsleratev2_reader.h"
+#include "iree/schemas/exsleratev2_verifier.h"
 
-void deserializeFromSLFb(const char* filename) {
+namespace {
+
+const char* llLayerKindName(uint8_t kind) {
+  switch (kind) {
+    case 0:
+      return "conv";
+    case 1:
+      return "pool";
+    case 2:
+      return "matmul";
+    case 3:
+      return "add";
+    case 4:
+      return "fully_connected";
+    case 5:
+      return "cpu";
+    case 6:
+      return "skip";
+    case 7:
+      return "reduce";
+    default:
+      return "unknown";
+  }
+}
+
+const char* llExecutionModeName(uint8_t mode) {
+  switch (mode) {
+    case 0:
+      return "exslerate";
+    case 1:
+      return "cpu";
+    case 2:
+      return "skip";
+    default:
+      return "unknown";
+  }
+}
+
+const char* llElementTypeName(uint8_t type) {
+  switch (type) {
+    case 0:
+      return "i8";
+    case 1:
+      return "f32";
+    case 2:
+      return "i32";
+    default:
+      return "unknown";
+  }
+}
+
+const char* llDataCategoryName(uint8_t category) {
+  switch (category) {
+    case 0:
+      return "weights";
+    case 1:
+      return "bias";
+    case 2:
+      return "input";
+    case 3:
+      return "output";
+    case 4:
+      return "atomic_bank";
+    case 5:
+      return "atomic_offset";
+    case 6:
+      return "lifetime";
+    case 7:
+      return "bnweight";
+    case 8:
+      return "bnbias";
+    case 9:
+      return "lut";
+    default:
+      return "unknown";
+  }
+}
+
+void* readEntireFile(const char* filename, size_t* out_size) {
   FILE* fp = fopen(filename, "rb");
   if (!fp) {
     printf("Error opening file for reading\n");
-    return;
+    return nullptr;
   }
 
   fseek(fp, 0, SEEK_END);
@@ -22,16 +104,22 @@ void deserializeFromSLFb(const char* filename) {
     printf("Error reading file\n");
     fclose(fp);
     free(buffer);
-    return;
+    return nullptr;
   }
   fclose(fp);
 
+  *out_size = size;
+  return buffer;
+}
+
+// Dumps the legacy exsleratev2_executable_def.fbs ("exsleratev2") schema,
+// still the only format the runtime driver actually deserializes.
+void deserializeFromSLFb(const void* buffer) {
   iree_exsleratev2_hal_exsleratev2_ExecutableDef_table_t executable =
       iree_exsleratev2_hal_exsleratev2_ExecutableDef_as_root(buffer);
 
   if (!executable) {
     printf("Invalid FlatBuffer format\n");
-    free(buffer);
     return;
   }
 
@@ -63,7 +151,6 @@ void deserializeFromSLFb(const char* filename) {
       iree_exsleratev2_hal_exsleratev2_ExecutableDef_layers(executable);
   if (!layers) {
     printf("No layers found\n");
-    free(buffer);
     return;
   }
 
@@ -446,9 +533,301 @@ void deserializeFromSLFb(const char* filename) {
       }
     }
   }
-
-  free(buffer);
 }
+
+// Dumps the newer, experimental exsleratev2.fbs ("exsleratev2_ll") schema
+// produced by the EXSLHL->EXSLLL lowering path. As of this writing this
+// serializer is opt-in at compile time and has no runtime consumer yet; it
+// writes to a separate "<name>.exsl_ll.slfb" file alongside the legacy
+// ".slfb".
+void deserializeFromExslLlSLFb(const void* buffer) {
+  iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_table_t executable =
+      iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_as_root(buffer);
+
+  if (!executable) {
+    printf("Invalid FlatBuffer format (exsleratev2_ll)\n");
+    return;
+  }
+
+  iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_vec_t entry_points =
+      iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_entry_points(
+          executable);
+  if (entry_points) {
+    size_t count =
+        iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_vec_len(
+            entry_points);
+    printf("Found %zu entry points:\n", count);
+    for (size_t i = 0; i < count; i++) {
+      iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_table_t entry_point =
+          iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_vec_at(
+              entry_points, i);
+      const char* name =
+          iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_name(entry_point);
+      uint32_t ordinal =
+          iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_ordinal(
+              entry_point);
+      uint32_t layer_index =
+          iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_layer_index(
+              entry_point);
+      printf("  %zu: %s (ordinal=%u, layer_index=%u)\n", i,
+             name ? name : "(null)", ordinal, layer_index);
+    }
+  }
+
+  flatbuffers_uint8_vec_t cpu_code =
+      iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_cpu_code(executable);
+  if (cpu_code) {
+    printf("CPU Code size: %zu bytes\n", flatbuffers_uint8_vec_len(cpu_code));
+  }
+
+  const char* cpu_func_name =
+      iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_cpu_function_name(
+          executable);
+  if (cpu_func_name) {
+    printf("CPU Function Name: %s\n", cpu_func_name);
+  }
+
+  iree_exsleratev2_hal_exsleratev2_ll_LayerDef_vec_t layers =
+      iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_layers(executable);
+  if (!layers) {
+    printf("No layers found\n");
+    return;
+  }
+
+  size_t layer_count =
+      iree_exsleratev2_hal_exsleratev2_ll_LayerDef_vec_len(layers);
+  printf("Found %zu layers:\n", layer_count);
+
+  for (size_t i = 0; i < layer_count; i++) {
+    iree_exsleratev2_hal_exsleratev2_ll_LayerDef_table_t layer =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_vec_at(layers, i);
+    printf("Layer %zu:\n", i);
+    if (!layer) {
+      printf("  ERROR: NULL layer pointer!\n");
+      continue;
+    }
+
+    uint8_t kind = iree_exsleratev2_hal_exsleratev2_ll_LayerDef_kind(layer);
+    printf("  kind: %u (%s)\n", kind, llLayerKindName(kind));
+
+    iree_exsleratev2_hal_exsleratev2_ll_ExecutionDef_table_t execution =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_execution(layer);
+    if (execution) {
+      uint8_t mode =
+          iree_exsleratev2_hal_exsleratev2_ll_ExecutionDef_mode(execution);
+      const char* kernel_name =
+          iree_exsleratev2_hal_exsleratev2_ll_ExecutionDef_kernel_name(
+              execution);
+      printf("  Execution: mode=%u (%s), kernel_name=%s\n", mode,
+             llExecutionModeName(mode), kernel_name ? kernel_name : "(none)");
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_TileDef_table_t tiles =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_tiles(layer);
+    if (tiles) {
+      printf(
+          "  Tiles: input=%ux%u output=%ux%u input_tile_buffer_size=%u\n",
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_input_tile_height(
+              tiles),
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_input_tile_width(tiles),
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_output_tile_height(
+              tiles),
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_output_tile_width(
+              tiles),
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_input_tile_buffer_size(
+              tiles));
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_QuantDef_table_t quant =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_quant(layer);
+    if (quant) {
+      printf(
+          "  Quant: scale=%f zero_point=%d leaky_relu_alpha=%f "
+          "requant_output_scale=%f dequant_scale=%f\n",
+          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_quant_scale(quant),
+          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_quant_zero_point(
+              quant),
+          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_leaky_relu_alpha(
+              quant),
+          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_requant_output_scale(
+              quant),
+          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_dequant_scale(quant));
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_BindingDef_table_t bindings =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_bindings(layer);
+    if (bindings) {
+      bool has_filter_binding =
+          iree_exsleratev2_hal_exsleratev2_ll_BindingDef_has_filter_binding(
+              bindings);
+      bool has_bias_binding =
+          iree_exsleratev2_hal_exsleratev2_ll_BindingDef_has_bias_binding(
+              bindings);
+      printf("  Bindings: activation_binding_index=%u\n",
+             iree_exsleratev2_hal_exsleratev2_ll_BindingDef_activation_binding_index(
+                 bindings));
+      printf(
+          "    filter: has_binding=%s index=%u byte_offset=%lu\n",
+          has_filter_binding ? "true" : "false",
+          iree_exsleratev2_hal_exsleratev2_ll_BindingDef_filter_binding_index(
+              bindings),
+          (unsigned long)
+              iree_exsleratev2_hal_exsleratev2_ll_BindingDef_filter_byte_offset(
+                  bindings));
+      printf(
+          "    bias: has_binding=%s index=%u byte_offset=%lu\n",
+          has_bias_binding ? "true" : "false",
+          iree_exsleratev2_hal_exsleratev2_ll_BindingDef_bias_binding_index(
+              bindings),
+          (unsigned long)
+              iree_exsleratev2_hal_exsleratev2_ll_BindingDef_bias_byte_offset(
+                  bindings));
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_BufferInfoDef_table_t buffer_info =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_buffer_info(layer);
+    if (buffer_info) {
+      uint8_t input_element_type =
+          iree_exsleratev2_hal_exsleratev2_ll_BufferInfoDef_input_element_type(
+              buffer_info);
+      uint8_t output_element_type =
+          iree_exsleratev2_hal_exsleratev2_ll_BufferInfoDef_output_element_type(
+              buffer_info);
+      printf(
+          "  BufferInfo: input_byte_size=%lu (%s), "
+          "output_byte_size=%lu (%s)\n",
+          (unsigned long)
+              iree_exsleratev2_hal_exsleratev2_ll_BufferInfoDef_input_byte_size(
+                  buffer_info),
+          llElementTypeName(input_element_type),
+          (unsigned long)
+              iree_exsleratev2_hal_exsleratev2_ll_BufferInfoDef_output_byte_size(
+                  buffer_info),
+          llElementTypeName(output_element_type));
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_LayoutDef_table_t layout =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_layout(layer);
+    if (layout) {
+      printf(
+          "  Layout: skip_input_tiling=%s skip_output_detiling=%s "
+          "output_layout_chw=%s\n",
+          iree_exsleratev2_hal_exsleratev2_ll_LayoutDef_skip_input_tiling(
+              layout)
+              ? "true"
+              : "false",
+          iree_exsleratev2_hal_exsleratev2_ll_LayoutDef_skip_output_detiling(
+              layout)
+              ? "true"
+              : "false",
+          iree_exsleratev2_hal_exsleratev2_ll_LayoutDef_output_layout_chw(
+              layout)
+              ? "true"
+              : "false");
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_table_t meta =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_meta(layer);
+    if (meta) {
+      printf(
+          "  Meta: input_tile_buffer=%u input_offset=%u output_offset=%u "
+          "num_channel=%u num_filter=%u\n",
+          iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_input_tile_buffer(
+              meta),
+          iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_input_offset(meta),
+          iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_output_offset(
+              meta),
+          iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_num_channel(meta),
+          iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_num_filter(meta));
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_CsrMapDef_table_t csr_map =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_csr_map(layer);
+    if (csr_map) {
+      iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_vec_t entries =
+          iree_exsleratev2_hal_exsleratev2_ll_CsrMapDef_entries(csr_map);
+      size_t csr_count =
+          entries
+              ? iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_vec_len(
+                    entries)
+              : 0;
+      printf("  CSR Map (%zu entries):\n", csr_count);
+      for (size_t j = 0; j < csr_count; j++) {
+        iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_table_t entry =
+            iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_vec_at(entries,
+                                                                    j);
+        // Note: `name` is declared in the schema but is never populated by
+        // the current serializer (address/value pairs only).
+        printf("    %zu: address=0x%X value=%u\n", j,
+               iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_address(entry),
+               iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_value(entry));
+      }
+    }
+
+    iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_vec_t data_buffers =
+        iree_exsleratev2_hal_exsleratev2_ll_LayerDef_data_buffers(layer);
+    if (data_buffers) {
+      size_t buffer_count =
+          iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_vec_len(
+              data_buffers);
+      printf("  Data Buffers (%zu):\n", buffer_count);
+      for (size_t j = 0; j < buffer_count; j++) {
+        iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_table_t data_buffer =
+            iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_vec_at(
+                data_buffers, j);
+        uint8_t category =
+            iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_category(
+                data_buffer);
+        uint8_t element_type =
+            iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_element_type(
+                data_buffer);
+        printf("    %zu: category=%u (%s), element_type=%u (%s)\n", j,
+               category, llDataCategoryName(category), element_type,
+               llElementTypeName(element_type));
+
+        // The producer picks i8_data vs. i32_data by the source buffer's
+        // bit width, not by `category`; u32_data is declared but currently
+        // never populated. Print whichever is actually present.
+        flatbuffers_int8_vec_t i8_data =
+            iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_i8_data(
+                data_buffer);
+        flatbuffers_int32_vec_t i32_data =
+            iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_i32_data(
+                data_buffer);
+        flatbuffers_uint32_vec_t u32_data =
+            iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_u32_data(
+                data_buffer);
+
+        if (i8_data) {
+          size_t len = flatbuffers_int8_vec_len(i8_data);
+          printf("      i8_data (%zu): [", len);
+          for (size_t k = 0; k < len; k++) {
+            printf("%d ", flatbuffers_int8_vec_at(i8_data, k));
+          }
+          printf("]\n");
+        }
+        if (i32_data) {
+          size_t len = flatbuffers_int32_vec_len(i32_data);
+          printf("      i32_data (%zu): [", len);
+          for (size_t k = 0; k < len; k++) {
+            printf("%d ", flatbuffers_int32_vec_at(i32_data, k));
+          }
+          printf("]\n");
+        }
+        if (u32_data) {
+          size_t len = flatbuffers_uint32_vec_len(u32_data);
+          printf("      u32_data (%zu): [", len);
+          for (size_t k = 0; k < len; k++) {
+            printf("%u ", flatbuffers_uint32_vec_at(u32_data, k));
+          }
+          printf("]\n");
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   if (argc != 2) {
@@ -457,7 +836,36 @@ int main(int argc, char** argv) {
   }
 
   const char* filename = argv[1];
-  deserializeFromSLFb(filename);
+  size_t size = 0;
+  void* buffer = readEntireFile(filename, &size);
+  if (!buffer) {
+    return 1;
+  }
 
-  return 0;
+  int legacy_verify_ret =
+      iree_exsleratev2_hal_exsleratev2_ExecutableDef_verify_as_root(buffer,
+                                                                     size);
+  if (legacy_verify_ret == flatcc_verify_ok) {
+    printf("Detected schema: exsleratev2 (legacy)\n\n");
+    deserializeFromSLFb(buffer);
+    free(buffer);
+    return 0;
+  }
+
+  int ll_verify_ret =
+      iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_verify_as_root(buffer,
+                                                                        size);
+  if (ll_verify_ret == flatcc_verify_ok) {
+    printf("Detected schema: exsleratev2_ll (experimental)\n\n");
+    deserializeFromExslLlSLFb(buffer);
+    free(buffer);
+    return 0;
+  }
+
+  printf("Failed to verify FlatBuffer against either known schema:\n");
+  printf("  exsleratev2:    %s\n",
+         flatcc_verify_error_string(legacy_verify_ret));
+  printf("  exsleratev2_ll: %s\n", flatcc_verify_error_string(ll_verify_ret));
+  free(buffer);
+  return 1;
 }
