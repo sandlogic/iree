@@ -554,13 +554,12 @@ void deserializeFromExslLlSLFb(const void* buffer) {
           executable);
   if (entry_points) {
     size_t count =
-        iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_vec_len(
-            entry_points);
+        iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_vec_len(entry_points);
     printf("Found %zu entry points:\n", count);
     for (size_t i = 0; i < count; i++) {
       iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_table_t entry_point =
-          iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_vec_at(
-              entry_points, i);
+          iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_vec_at(entry_points,
+                                                                   i);
       const char* name =
           iree_exsleratev2_hal_exsleratev2_ll_EntryPointDef_name(entry_point);
       uint32_t ordinal =
@@ -627,13 +626,10 @@ void deserializeFromExslLlSLFb(const void* buffer) {
     if (tiles) {
       printf(
           "  Tiles: input=%ux%u output=%ux%u input_tile_buffer_size=%u\n",
-          iree_exsleratev2_hal_exsleratev2_ll_TileDef_input_tile_height(
-              tiles),
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_input_tile_height(tiles),
           iree_exsleratev2_hal_exsleratev2_ll_TileDef_input_tile_width(tiles),
-          iree_exsleratev2_hal_exsleratev2_ll_TileDef_output_tile_height(
-              tiles),
-          iree_exsleratev2_hal_exsleratev2_ll_TileDef_output_tile_width(
-              tiles),
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_output_tile_height(tiles),
+          iree_exsleratev2_hal_exsleratev2_ll_TileDef_output_tile_width(tiles),
           iree_exsleratev2_hal_exsleratev2_ll_TileDef_input_tile_buffer_size(
               tiles));
     }
@@ -645,10 +641,8 @@ void deserializeFromExslLlSLFb(const void* buffer) {
           "  Quant: scale=%f zero_point=%d leaky_relu_alpha=%f "
           "requant_output_scale=%f dequant_scale=%f\n",
           iree_exsleratev2_hal_exsleratev2_ll_QuantDef_quant_scale(quant),
-          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_quant_zero_point(
-              quant),
-          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_leaky_relu_alpha(
-              quant),
+          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_quant_zero_point(quant),
+          iree_exsleratev2_hal_exsleratev2_ll_QuantDef_leaky_relu_alpha(quant),
           iree_exsleratev2_hal_exsleratev2_ll_QuantDef_requant_output_scale(
               quant),
           iree_exsleratev2_hal_exsleratev2_ll_QuantDef_dequant_scale(quant));
@@ -663,9 +657,10 @@ void deserializeFromExslLlSLFb(const void* buffer) {
       bool has_bias_binding =
           iree_exsleratev2_hal_exsleratev2_ll_BindingDef_has_bias_binding(
               bindings);
-      printf("  Bindings: activation_binding_index=%u\n",
-             iree_exsleratev2_hal_exsleratev2_ll_BindingDef_activation_binding_index(
-                 bindings));
+      printf(
+          "  Bindings: activation_binding_index=%u\n",
+          iree_exsleratev2_hal_exsleratev2_ll_BindingDef_activation_binding_index(
+              bindings));
       printf(
           "    filter: has_binding=%s index=%u byte_offset=%lu\n",
           has_filter_binding ? "true" : "false",
@@ -735,8 +730,7 @@ void deserializeFromExslLlSLFb(const void* buffer) {
           iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_input_tile_buffer(
               meta),
           iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_input_offset(meta),
-          iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_output_offset(
-              meta),
+          iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_output_offset(meta),
           iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_num_channel(meta),
           iree_exsleratev2_hal_exsleratev2_ll_LayerMetaDef_num_filter(meta));
     }
@@ -748,14 +742,12 @@ void deserializeFromExslLlSLFb(const void* buffer) {
           iree_exsleratev2_hal_exsleratev2_ll_CsrMapDef_entries(csr_map);
       size_t csr_count =
           entries
-              ? iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_vec_len(
-                    entries)
+              ? iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_vec_len(entries)
               : 0;
       printf("  CSR Map (%zu entries):\n", csr_count);
       for (size_t j = 0; j < csr_count; j++) {
         iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_table_t entry =
-            iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_vec_at(entries,
-                                                                    j);
+            iree_exsleratev2_hal_exsleratev2_ll_CsrEntryDef_vec_at(entries, j);
         // Note: `name` is declared in the schema but is never populated by
         // the current serializer (address/value pairs only).
         printf("    %zu: address=0x%X value=%u\n", j,
@@ -781,8 +773,8 @@ void deserializeFromExslLlSLFb(const void* buffer) {
         uint8_t element_type =
             iree_exsleratev2_hal_exsleratev2_ll_DataBufferDef_element_type(
                 data_buffer);
-        printf("    %zu: category=%u (%s), element_type=%u (%s)\n", j,
-               category, llDataCategoryName(category), element_type,
+        printf("    %zu: category=%u (%s), element_type=%u (%s)\n", j, category,
+               llDataCategoryName(category), element_type,
                llElementTypeName(element_type));
 
         // The producer picks i8_data vs. i32_data by the source buffer's
@@ -844,7 +836,7 @@ int main(int argc, char** argv) {
 
   int legacy_verify_ret =
       iree_exsleratev2_hal_exsleratev2_ExecutableDef_verify_as_root(buffer,
-                                                                     size);
+                                                                    size);
   if (legacy_verify_ret == flatcc_verify_ok) {
     printf("Detected schema: exsleratev2 (legacy)\n\n");
     deserializeFromSLFb(buffer);
@@ -854,7 +846,7 @@ int main(int argc, char** argv) {
 
   int ll_verify_ret =
       iree_exsleratev2_hal_exsleratev2_ll_ExecutableDef_verify_as_root(buffer,
-                                                                        size);
+                                                                       size);
   if (ll_verify_ret == flatcc_verify_ok) {
     printf("Detected schema: exsleratev2_ll (experimental)\n\n");
     deserializeFromExslLlSLFb(buffer);

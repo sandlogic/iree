@@ -141,19 +141,6 @@ flatbuffer_c_library(
   PUBLIC
 )
 
-flatbuffer_c_library(
-  NAME
-    exsleratev2_c_fbs
-  SRCS
-    "exsleratev2.fbs"
-  FLATCC_ARGS
-    "--reader"
-    "--builder"
-    "--verifier"
-    "--json"
-  PUBLIC
-)
-
 add_custom_command(OUTPUT cpu_data_headers_filegroup.stamp
     COMMAND ${CMAKE_COMMAND} -E touch cpu_data_headers_filegroup.stamp
   DEPENDS

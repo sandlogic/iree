@@ -434,16 +434,16 @@ static FailureOr<Operation *> lowerExsleratev2MatmulOpWithEncoding(
 
   // Loop dims: d0=ty(M), d1=fs(N/32), d2=cs(K/32), d3=filt(32), d4=c(32).
   // LHS [M, K/32, 1, 32]:   {d0, d2, 0, d4}
-  AffineMap inputMap = AffineMap::get(5, 0, {d(0), d(2), zero, d(4)},
-                                      builder.getContext());
+  AffineMap inputMap =
+      AffineMap::get(5, 0, {d(0), d(2), zero, d(4)}, builder.getContext());
   // RHS [N/32, K/32, 32, 32]: {d1, d2, d3, d4}. Note the RHS pack sets
   // outer_dims_perm=[1,0] (N before K), so the packed dim order is
   // [N/32, K/32, 32, 32] = [fs, cs, filt, c], not [cs, fs, ...].
-  AffineMap filterMap = AffineMap::get(5, 0, {d(1), d(2), d(3), d(4)},
-                                       builder.getContext());
+  AffineMap filterMap =
+      AffineMap::get(5, 0, {d(1), d(2), d(3), d(4)}, builder.getContext());
   // RESULT [M, N/32, 1, 32]: {d0, d1, 0, d3}
-  AffineMap outputMap = AffineMap::get(5, 0, {d(0), d(1), zero, d(3)},
-                                       builder.getContext());
+  AffineMap outputMap =
+      AffineMap::get(5, 0, {d(0), d(1), zero, d(3)}, builder.getContext());
 
   SmallVector<utils::IteratorType> iterTypes = {
       utils::IteratorType::parallel,  // d0: ty
@@ -459,13 +459,15 @@ static FailureOr<Operation *> lowerExsleratev2MatmulOpWithEncoding(
   Type i32Ty = builder.getI32Type();
   Type accTy = packedOutTy.getElementType();
   auto extToI32 = [&](OpBuilder &nb, Location nb_loc, Value v) -> Value {
-    if (v.getType() == i32Ty) return v;
+    if (v.getType() == i32Ty) {
+      return v;
+    }
     return arith::ExtSIOp::create(nb, nb_loc, i32Ty, v)->getResult(0);
   };
   Value result =
       linalg::GenericOp::create(
-          builder, loc, packedOutTy,
-          ValueRange{packedIn, packedFilter}, ValueRange{packedOut},
+          builder, loc, packedOutTy, ValueRange{packedIn, packedFilter},
+          ValueRange{packedOut},
           ArrayRef<AffineMap>{inputMap, filterMap, outputMap}, iterTypes,
           [&](OpBuilder &nb, Location nb_loc, ValueRange args) {
             Value lhs = extToI32(nb, nb_loc, args[0]);
@@ -473,8 +475,8 @@ static FailureOr<Operation *> lowerExsleratev2MatmulOpWithEncoding(
             Value mul =
                 arith::MulIOp::create(nb, nb_loc, lhs, rhs)->getResult(0);
             if (mul.getType() != accTy) {
-              mul = arith::ExtSIOp::create(nb, nb_loc, accTy, mul)
-                        ->getResult(0);
+              mul =
+                  arith::ExtSIOp::create(nb, nb_loc, accTy, mul)->getResult(0);
             }
             Value add =
                 arith::AddIOp::create(nb, nb_loc, mul, args[2])->getResult(0);
@@ -494,18 +496,16 @@ static FailureOr<Operation *> lowerExsleratev2MatmulOpWithEncoding(
   if (lhsType.getRank() == 2 && rhsOrigType.getRank() == 2 &&
       outType.getRank() == 2 && lhsType.hasStaticShape() &&
       rhsOrigType.hasStaticShape() && outType.hasStaticShape()) {
-    resultOp->setAttr(
-        "exsleratev2.matmul_in_shape",
-        builder.getDenseI64ArrayAttr(
-            {lhsType.getDimSize(0), lhsType.getDimSize(1)}));
+    resultOp->setAttr("exsleratev2.matmul_in_shape",
+                      builder.getDenseI64ArrayAttr(
+                          {lhsType.getDimSize(0), lhsType.getDimSize(1)}));
     resultOp->setAttr(
         "exsleratev2.matmul_weight_shape",
         builder.getDenseI64ArrayAttr(
             {rhsOrigType.getDimSize(0), rhsOrigType.getDimSize(1)}));
-    resultOp->setAttr(
-        "exsleratev2.matmul_out_shape",
-        builder.getDenseI64ArrayAttr(
-            {outType.getDimSize(0), outType.getDimSize(1)}));
+    resultOp->setAttr("exsleratev2.matmul_out_shape",
+                      builder.getDenseI64ArrayAttr(
+                          {outType.getDimSize(0), outType.getDimSize(1)}));
   }
   return resultOp;
 }
