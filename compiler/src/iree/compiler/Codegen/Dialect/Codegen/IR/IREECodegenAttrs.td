@@ -36,6 +36,18 @@ def EXSLERATEV2_MatMul
 def EXSLERATEV2_Reduce
     : I32EnumAttrCase<"Exsleratev2Reduce", 1005>;
 
+// FP8 LLM pipeline: M core standalone RMSNorm.
+def EXSLERATEV2_RmsNorm
+    : I32EnumAttrCase<"Exsleratev2RmsNorm", 1006>;
+
+// FP8 LLM pipeline: attention (QK^T + mask, softmax, P.V).
+def EXSLERATEV2_Attention
+    : I32EnumAttrCase<"Exsleratev2Attention", 1007>;
+
+// FP8 LLM pipeline: rotary position embedding.
+def EXSLERATEV2_Rope
+    : I32EnumAttrCase<"Exsleratev2Rope", 1008>;
+
 def None : I32EnumAttrCase<"None", 0xffff>;
 
 // EnumAttrCase for all known lowerings for ops within dispatch region
@@ -59,6 +71,12 @@ def DispatchLoweringPassPipelineEnum : I32EnumAttr<
     EXSLERATEV2_Pool,
 
     EXSLERATEV2_Reduce,
+
+    EXSLERATEV2_RmsNorm,
+
+    EXSLERATEV2_Attention,
+
+    EXSLERATEV2_Rope,
 
     // None to specify no in-built pipelines to use.
     None

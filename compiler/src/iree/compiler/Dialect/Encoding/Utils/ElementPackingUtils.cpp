@@ -97,6 +97,9 @@ Value calculateStorageElementCountInBytes(Location loc,
   // Scale by dynamic dims, if present.
   auto value =
       arith::ConstantIndexOp::create(builder, loc, staticCount).getResult();
+  for (Value dim : dynamicDims) {
+    value = builder.createOrFold<arith::MulIOp>(loc, value, dim);
+  }
 
   // Sub-byte packing requires putting multiple elements in the same byte.
   if (needsPacking) {

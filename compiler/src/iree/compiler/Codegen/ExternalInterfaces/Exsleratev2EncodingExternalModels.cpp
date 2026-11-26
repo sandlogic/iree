@@ -28,6 +28,7 @@
 #include "iree/compiler/Codegen/ExternalInterfaces/Utils.h"
 #include "iree/compiler/Dialect/Encoding/IR/EncodingTypes.h"
 #include "iree/compiler/Dialect/Encoding/Utils/Utils.h"
+#include "llvm/ADT/Sequence.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -751,6 +752,12 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
         // NHWC [H, W, C] → [H/tH, W/tW, C/32, tH, tW, 32]
         info.innerDimsPos = {0, 1, 2};
         info.innerTileSizes = {tileH, tileW, kExslChSet};
+        // outerDimsPerm must be explicit identity, not empty: an empty perm
+        // makes applyPermutation in lowerGenericOpWithResolvedLayouts index
+        // out of bounds when an elementwise producer/consumer (e.g. the
+        // dequant+ReLU feeding a max-pool) carries this encoding.
+        info.outerDimsPerm =
+            llvm::to_vector(llvm::seq<int64_t>(0, type.getRank()));
       } else {
         // NCHW [C, H, W] → [H/tH, W/tW, C/32, tH, tW, 32] (spatial-tile-major,
         // matches runtime)
@@ -771,9 +778,13 @@ struct Exsleratev2EncodingPackedLayoutMaterializerAttr
       }
       if (isNHWC && isFHWC) {
         // FHWC [F, KH, KW, C] → [F/32, KH, KW, C/32, 32, 32]
-        // Tile dim 0 (F) and dim 3 (C); outer order already correct — no perm.
+        // Tile dim 0 (F) and dim 3 (C); outer order already correct, but keep
+        // the perm explicit identity (empty perm breaks applyPermutation in
+        // lowerGenericOpWithResolvedLayouts).
         info.innerDimsPos = {0, 3};
         info.innerTileSizes = {kExslFiltSet, kExslChSet};
+        info.outerDimsPerm =
+            llvm::to_vector(llvm::seq<int64_t>(0, type.getRank()));
       } else if (isNHWC) {
         // HWCF [KH, KW, C, F] → [F/32, KH, KW, C/32, 32, 32]
         info.outerDimsPerm = {3, 0, 1, 2};
