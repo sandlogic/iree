@@ -53,6 +53,12 @@ inferConvolutionDims(ArrayRef<AffineMap> indexingMaps);
 
 bool isaEXSLTileConvolutionOpInterface(linalg::LinalgOp linalgOp);
 
+/// Returns true iff `linalgOp` is the EXSLERATEV2 tiled matmul generic produced
+/// by lowerExsleratev2MatmulOpWithEncoding. With 1x1 tiles the loop nest is 5-D
+/// (d0=ty, d1=fs, d2=cs, d3=filt, d4=c) and the RHS input map has 4 results
+/// ([fs, cs, filt, c]), unlike the 6-result conv filter map.
+bool isaEXSLTileMatmulOpInterface(linalg::LinalgOp linalgOp);
+
 // Checks whether `linalgOp` conforms to ScaledContractionOp.
 bool isaScaledContractionOpInterface(linalg::LinalgOp linalgOp);
 
@@ -69,3 +75,4 @@ isScaledContractionImpl(Operation *op,
 } // namespace  mlir::iree_compiler::IREE::LinalgExt
 
 #endif // IREE_COMPILER_DIALECT_LINALGEXT_UTILS_MATCHUTILS_H_
+
